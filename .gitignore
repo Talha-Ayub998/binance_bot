@@ -1,0 +1,33 @@
+# Virtual environment
+venv/
+.env
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Django specific
+db.sqlite3
+*.log
+staticfiles/
+media/
+*.pot
+*.pyc
+
+# Ignore migrations
+*/migrations/*
+
+# Ignore IDE/editor config files
+.vscode/
+.idea/
+
+# Ignore macOS specific files
+.DS_Store
+
+# Ignore coverage reports
+htmlcov/
+.coverage
+
+# Ignore other temporary files
+*.swp
