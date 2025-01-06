@@ -407,9 +407,9 @@ def rebalance_portfolio():
 
 if __name__ == "__main__":
     rebalance_portfolio()
-    # schedule.every().day.at("00:00").do(rebalance_portfolio)
-    # schedule.every().day.at("12:00").do(monitor_orders)
+    schedule.every().day.at("00:00").do(rebalance_portfolio)
+    schedule.every().day.at("12:00").do(monitor_orders)
 
-    # while True:
-    #     schedule.run_pending()
-    #     time.sleep(1)
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
