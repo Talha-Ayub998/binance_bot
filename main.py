@@ -402,7 +402,7 @@ def rebalance_portfolio():
     # 6) Save the updated portfolio (convert dict back to list)
     updated_portfolio = list(portfolio_dict.values())
     save_json_file(updated_portfolio, "top_coins.json")
-    # send_telegram_alert("Rebalance complete. Portfolio file updated.")
+    send_telegram_alert("Rebalance complete. Portfolio file updated.")
 
 
 if __name__ == "__main__":
