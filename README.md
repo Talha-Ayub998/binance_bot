@@ -1,1 +1,1 @@
-# crypto_bot
+# binance_bot
