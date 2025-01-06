@@ -8,19 +8,16 @@ import schedule
 import math
 import json
 import os
+from dotenv import load_dotenv
 
-# Binance API keys
-API_KEY = 'xLnbhvq2dcruSMxAWBNX7FTtSB2vP0HgwzTl5wAsM1WSJXcG09kUpsLmj8lKqqwx'
-API_SECRET = 'b1m6WzzvzYtAfpeUJa2HijAAlp2czNqAmftszSlhFEqQ8bQn3b95mpCdLLDHX3wo'
+# Load the .env file
+load_dotenv()
 
-
-# Farid
-API_KEY = '9QCanVTv2y9IP5EOxwaO0RJ8jmkkF0F8Y1Y4FzgpYYRwES7yXPbRrpDW5PsUI8oZ'
-API_SECRET = 'mcKWBp9qYhochJXli38knSM6xHYfHahqh4QlfmVpPhrdy91D2QA8CssI6LH6ralW'
-
-# Telegram Bot Setup
-TELEGRAM_TOKEN = "8081228567:AAEF2NkMLxJersBtFejm6j595mkCh2R0YOs"
-TELEGRAM_CHAT_ID = "7776049148"
+# Retrieve the environment variables
+API_KEY = os.getenv("API_KEY")
+API_SECRET = os.getenv("API_SECRET")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Initialize Binance Client
 client = Client(API_KEY, API_SECRET, testnet=True)
