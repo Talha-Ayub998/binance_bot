@@ -235,12 +235,10 @@ def round_price(symbol, price):
     return price
 
 
-def place_vwap_order(symbol, side, allocation):
+def place_vwap_order(symbol, side, allocation, vwap):
     """Place limit order at VWAP and save to pending orders file."""
     try:
         # Fetch VWAP and calculate quantity/price
-        data = fetch_ohlcv(symbol)
-        vwap = calculate_vwap(data)
         price = vwap if side == "BUY" else vwap * 1.02
         quantity = allocation / price
 
@@ -426,8 +424,7 @@ def rebalance_portfolio():
     portfolio_dict = {p["symbol"]: p for p in portfolio}
 
     # 4) Market-sell any coin that's in the file but not in today's top 10
-    coins_to_sell = [
-        symbol for symbol in portfolio_dict if symbol not in new_symbols]
+    coins_to_sell = [symbol for symbol in portfolio_dict if symbol not in new_symbols]
     if coins_to_sell:
         sell_message = f"Selling positions not in today's Top 10 ({current_time_utc}):\n"
         for symbol in coins_to_sell:
@@ -447,19 +444,27 @@ def rebalance_portfolio():
         send_telegram_alert(sell_message)
 
     # 5) Market-buy any new coins that are in today's top 10 but not in the file
-    coins_to_buy = [
-        symbol for symbol in new_symbols if symbol not in portfolio_dict]
+    coins_to_buy = [symbol for symbol in new_symbols if symbol not in portfolio_dict]
     if coins_to_buy:
         buy_message = f"Buying new coins in today's Top 10 (as of {current_time_utc}):\n"
         allocation_per_coin = PORTFOLIO_VALUE / len(today_top_coins)
         coin_map = {c["symbol"]: c for c in today_top_coins}
+        # Temporary dictionary to store calculated values
+        buy_data = {}
 
-        # First loop: Generate the buy message
+        # First loop: Calculate and generate the buy message
         for symbol in coins_to_buy:
             coin_data = coin_map[symbol]
-            vwap = calculate_vwap(fetch_ohlcv(symbol))
+            vwap = calculate_vwap(fetch_ohlcv(symbol))  # Calculate VWAP once
             quantity = allocation_per_coin / vwap
             quantity = round_quantity(symbol, quantity)
+
+            # Store data in temporary dictionary for reuse
+            buy_data[symbol] = {
+                "vwap": vwap,
+                "quantity": quantity,
+                "roc30": coin_data["ROC30"],
+            }
 
             buy_message += (
                 f"- {symbol}: ROC30={coin_data['ROC30']:.3f}%, VWAP={vwap:.4f}, "
@@ -473,15 +478,19 @@ def rebalance_portfolio():
         send_telegram_alert(buy_message)
 
         # Second loop: Place the BUY orders and update the portfolio
-        for symbol in coins_to_buy:
-            coin_data = coin_map[symbol]
-            place_vwap_order(symbol=symbol, side="BUY",
-                             allocation=allocation_per_coin)
+        for symbol, data in buy_data.items():
+            # Reuse calculated values
+            place_vwap_order(
+                symbol=symbol,
+                side="BUY",
+                allocation=allocation_per_coin,
+                vwap=data["vwap"],
+            )
 
             # Update the portfolio dictionary
             portfolio_dict[symbol] = {
                 "symbol": symbol,
-                "quantity": allocation_per_coin / calculate_vwap(fetch_ohlcv(symbol)),
+                "quantity": data["quantity"],
                 "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             }
     else:
