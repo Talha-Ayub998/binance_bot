@@ -1,3 +1,5 @@
+import sys
+import logging
 import pandas as pd
 import requests
 import time
@@ -9,9 +11,15 @@ import math
 import json
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 
 # Load the .env file
 load_dotenv()
+
+# Create a custom logger
+logger = logging.getLogger('binance_bot')
+logger.setLevel(logging.INFO)
+
 
 # Retrieve the environment variables
 API_KEY = os.getenv("API_KEY")
@@ -36,7 +44,43 @@ def send_telegram_alert(message):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Error sending Telegram alert: {e}")
+        print_log(f"Error sending Telegram alert: {e}")
+
+
+def get_folder_logger():
+    # Determine the current working directory and log file path
+    folder_path = Path(os.getcwd())
+    log_file = folder_path / f"{folder_path.name}.log"
+
+    # Create a unique logger name based on the folder name
+    logger_name = f"{folder_path.name}_logger"
+    logger = logging.getLogger(logger_name)
+
+    # If the logger has no handlers, configure it
+    if not logger.hasHandlers():
+        logger.setLevel(logging.DEBUG)
+
+        # Create a file handler for logging
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.DEBUG)
+
+        # Define and set the formatter for the handler
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+
+        # Add the handler to the logger
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+def print_log(message):
+    # Print the message to the console
+    print(message)
+    # Retrieve the logger and log the message at INFO level
+    logger = get_folder_logger()
+    logger.info(message)
 
 
 def fetch_ohlcv(symbol, interval="1h", lookback="1 day ago UTC"):
@@ -64,7 +108,7 @@ def fetch_ohlcv(symbol, interval="1h", lookback="1 day ago UTC"):
         response = requests.get(url, params=params)
         # Check for errors
         if response.status_code != 200:
-            print(f"Error fetching data from Binance: {response.text}")
+            print_log(f"Error fetching data from Binance: {response.text}")
             return pd.DataFrame()
         # Parse response JSON
         raw_data = response.json()
@@ -80,7 +124,7 @@ def fetch_ohlcv(symbol, interval="1h", lookback="1 day ago UTC"):
         data = data[['open', 'high', 'low', 'close', 'volume']].astype(float)
         return data
     except Exception as e:
-        print(f"Error in fetch_ohlcv: {e}")
+        print_log(f"Error in fetch_ohlcv: {e}")
         return pd.DataFrame()
 
 
@@ -105,48 +149,53 @@ def is_strategy_active(symbol, ma_period=50, interval="1d", lookback="51 days ag
     try:
         data = fetch_ohlcv(symbol, interval=interval, lookback=lookback)
         if data.empty or len(data) < ma_period + 1:
-            print(
+            print_log(
                 f"Not enough data to calculate {ma_period}-day MA for {symbol}.")
             return False
         data = data.iloc[:-1]
         ma = data['close'].rolling(window=ma_period).mean().iloc[-1]
         return data['close'].iloc[-1] > ma
     except Exception as e:
-        print(f"Error in is_strategy_active: {e}")
+        print_log(f"Error in is_strategy_active: {e}")
         return False
 
 
 # ---- Strategy Functions ----
 def get_top_10_coins_usdt():
-    """Get symbols of the top 10 USDT pairs by ROC30 and volume."""
-    symbols = [s['symbol'] for s in client.get_exchange_info(
-    )['symbols'] if s['quoteAsset'] == 'USDT']
-    filtered_coins = []
-    for symbol in symbols:
-        try:
-            data = fetch_ohlcv(symbol, interval="1d",
-                               lookback="31 days ago UTC")
-            # Skip if data has less than 30 rows
-            if len(data) < 30:
-                print(
-                    f"{symbol}: Insufficient data (less than 30 days). Skipping...")
-                continue
-            roc30 = calculate_roc30(data)
-            volume = data['volume'][-7:].sum()
-            if volume and volume > 10_000_000:
-                filtered_coins.append({'symbol': symbol, 'ROC30': roc30})
-            else:
-                print(f"{symbol}: Insufficient liquidity (volume = {volume}). Skipping...")
-        except Exception as e:
-            print(f"Error fetching data for {symbol}: {e}")
+    try:
+        """Get symbols of the top 10 USDT pairs by ROC30 and volume."""
+        symbols = [s['symbol'] for s in client.get_exchange_info(
+        )['symbols'] if s['quoteAsset'] == 'USDT']
+        filtered_coins = []
+        for symbol in symbols:
+            try:
+                data = fetch_ohlcv(symbol, interval="1d",
+                                lookback="31 days ago UTC")
+                # Skip if data has less than 30 rows
+                if len(data) < 30:
+                    print_log(
+                        f"{symbol}: Insufficient data (less than 30 days). Skipping...")
+                    continue
+                roc30 = calculate_roc30(data)
+                volume = data['volume'][-7:].sum()
+                if volume and volume > 10_000_000:
+                    filtered_coins.append({'symbol': symbol, 'ROC30': roc30})
+                else:
+                    print_log(f"{symbol}: Insufficient liquidity (volume = {volume}). Skipping...")
+            except Exception as e:
+                print_log(f"Error fetching data for {symbol}: {e}")
+        filtered_coins = [
+            coin for coin in filtered_coins if coin['ROC30'] is not None]
+        # Sort by ROC30 and pick the top N symbols
+        top_symbols = sorted(
+            filtered_coins, key=lambda x: x['ROC30'], reverse=True)[:TOP_N_COINS]
+        # top_symbols = [coin['symbol'] for coin in sorted(
+        #     filtered_coins, key=lambda x: x['ROC30'], reverse=True)[:TOP_N_COINS]]
+        print_log(f"Top 10 Coins: {top_symbols}")
 
-    # Sort by ROC30 and pick the top N symbols
-    top_symbols = sorted(
-        filtered_coins, key=lambda x: x['ROC30'], reverse=True)[:TOP_N_COINS]
-    # top_symbols = [coin['symbol'] for coin in sorted(
-    #     filtered_coins, key=lambda x: x['ROC30'], reverse=True)[:TOP_N_COINS]]
-
-    return top_symbols
+        return top_symbols
+    except Exception as e:
+        print_log(f"Error in get_top_10_coins_usdt: {e}")
 
 
 def get_symbol_info(symbol):
@@ -294,6 +343,40 @@ def save_json_file(portfolio, filename="top_coins.json"):
         json.dump(portfolio, f, indent=2)
 
 
+def log_transaction(action, symbol, quantity, roc30=None, vwap=None, filename="coin_transactions.csv"):
+    try:
+        """
+        Log transaction details to a CSV file.
+
+        Args:
+            action (str): 'BUY' or 'SELL'.
+            symbol (str): The coin symbol.
+            quantity (float): Quantity of the coin.
+            roc30 (float, optional): Rate of Change over 30 days. Defaults to None.
+            vwap (float, optional): Volume Weighted Average Price. Defaults to None.
+            filename (str): Name of the CSV file. Defaults to 'coin_transactions.csv'.
+        """
+        current_time_utc = datetime.now(
+            timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        data = {
+            "time": [current_time_utc],
+            "action": [action],
+            "symbol": [symbol],
+            "quantity": [quantity],
+            "ROC30": [roc30],
+            "VWAP": [vwap]
+        }
+        df = pd.DataFrame(data)
+
+        # Check if the file exists to determine if the header should be written
+        file_exists = os.path.isfile(filename)
+
+        # Append to CSV; write header only if the file does not exist
+        df.to_csv(filename, mode='a', index=False, header=not file_exists)
+    except Exception as e:
+        print_log(f"log_transaction {e}")
+
+
 def rebalance_portfolio():
     """Rebalance the portfolio at 0000 UTC, based on BTC 50MA condition."""
     current_time_utc = datetime.now(
@@ -321,6 +404,7 @@ def rebalance_portfolio():
                         quantity=round_quantity(symbol, quantity)
                     )
                     send_telegram_alert(f"Market SELL for {symbol} x {quantity}. Order={sell_order}")
+                    log_transaction("SELL", symbol, quantity)
                 except Exception as e:
                     send_telegram_alert(f"Error selling {symbol}: {e}")
 
@@ -357,6 +441,7 @@ def rebalance_portfolio():
                 )
                 sell_message += f"- SOLD {symbol} x {qty}\n"
                 del portfolio_dict[symbol]
+                log_transaction("SELL", symbol, qty)
             except Exception as e:
                 sell_message += f"- Error selling {symbol}: {e}\n"
         send_telegram_alert(sell_message)
@@ -380,6 +465,9 @@ def rebalance_portfolio():
                 f"- {symbol}: ROC30={coin_data['ROC30']:.3f}%, VWAP={vwap:.4f}, "
                 f"Allocation={allocation_per_coin:.2f}, Qty={quantity}\n"
             )
+
+            log_transaction("BUY", symbol, quantity,
+                            roc30=coin_data["ROC30"], vwap=vwap)
 
         # Send the message before placing any orders
         send_telegram_alert(buy_message)
@@ -406,7 +494,7 @@ def rebalance_portfolio():
 
 
 if __name__ == "__main__":
-    # rebalance_portfolio()
+    rebalance_portfolio()
     schedule.every().day.at("00:00").do(rebalance_portfolio)
     schedule.every().day.at("12:00").do(monitor_orders)
 
