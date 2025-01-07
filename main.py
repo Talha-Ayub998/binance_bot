@@ -437,12 +437,17 @@ def rebalance_portfolio():
                     type=Client.ORDER_TYPE_MARKET,
                     quantity=round_quantity(symbol, qty)
                 )
-                sell_message += f"- SOLD {symbol} x {qty}\n"
+                sell_message += f"- SOLD {symbol}, {qty} & Order detials:{sell_order}\n"
                 del portfolio_dict[symbol]
-                del pending_orders[symbol]
+
+                # Safely remove the symbol from pending_orders
+                if symbol in pending_orders:
+                    del pending_orders[symbol]
+
                 log_transaction("SELL", symbol, qty)
             except Exception as e:
                 sell_message += f"- Error selling {symbol}: {e}\n"
+                print_log(f"Error while placing the SELL order (From file)")
         save_json_file(pending_orders, "pending_orders.json")
         send_telegram_alert(sell_message)
 
@@ -457,45 +462,50 @@ def rebalance_portfolio():
 
         # First loop: Calculate and generate the buy message
         for symbol in coins_to_buy:
-            coin_data = coin_map[symbol]
-            vwap = calculate_vwap(fetch_ohlcv(symbol))  # Calculate VWAP once
-            quantity = allocation_per_coin / vwap
-            quantity = round_quantity(symbol, quantity)
+            try:
+                coin_data = coin_map[symbol]
+                vwap = calculate_vwap(fetch_ohlcv(symbol))  # Calculate VWAP once
+                quantity = allocation_per_coin / vwap
+                quantity = round_quantity(symbol, quantity)
 
-            # Store data in temporary dictionary for reuse
-            buy_data[symbol] = {
-                "vwap": vwap,
-                "quantity": quantity,
-                "roc30": coin_data["ROC30"],
-            }
+                # Store data in temporary dictionary for reuse
+                buy_data[symbol] = {
+                    "vwap": vwap,
+                    "quantity": quantity,
+                    "roc30": coin_data["ROC30"],
+                }
 
-            buy_message += (
-                f"- {symbol}: ROC30={coin_data['ROC30']:.3f}%, VWAP={vwap:.4f}, "
-                f"Allocation={allocation_per_coin:.2f}, Qty={quantity}\n"
-            )
+                buy_message += (
+                    f"- {symbol}: ROC30={coin_data['ROC30']:.3f}%, VWAP={vwap:.4f}, "
+                    f"Allocation={allocation_per_coin:.2f}, Qty={quantity}\n"
+                )
 
-            log_transaction("BUY", symbol, quantity,
-                            roc30=coin_data["ROC30"], vwap=vwap)
-
+                log_transaction("BUY", symbol, quantity,
+                                roc30=coin_data["ROC30"], vwap=vwap)
+            except Exception as e:
+                buy_message += f"- Error selling {symbol}: {e}\n"
         # Send the message before placing any orders
         send_telegram_alert(buy_message)
 
         # Second loop: Place the BUY orders and update the portfolio
         for symbol, data in buy_data.items():
-            # Reuse calculated values
-            place_vwap_order(
-                symbol=symbol,
-                side="BUY",
-                allocation=allocation_per_coin,
-                vwap=data["vwap"],
-            )
+            try:
+                # Reuse calculated values
+                place_vwap_order(
+                    symbol=symbol,
+                    side="BUY",
+                    allocation=allocation_per_coin,
+                    vwap=data["vwap"],
+                )
 
-            # Update the portfolio dictionary
-            portfolio_dict[symbol] = {
-                "symbol": symbol,
-                "quantity": data["quantity"],
-                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            }
+                # Update the portfolio dictionary
+                portfolio_dict[symbol] = {
+                    "symbol": symbol,
+                    "quantity": data["quantity"],
+                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                }
+            except Exception as e:
+                print_log(f"Error while placing the BUY order")
     else:
         send_telegram_alert("Already holding today's Top 10. No buys needed.")
 
