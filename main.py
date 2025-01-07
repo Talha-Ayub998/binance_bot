@@ -406,7 +406,7 @@ def rebalance_portfolio():
 
 
 if __name__ == "__main__":
-    rebalance_portfolio()
+    # rebalance_portfolio()
     schedule.every().day.at("00:00").do(rebalance_portfolio)
     schedule.every().day.at("12:00").do(monitor_orders)
 
