@@ -377,8 +377,7 @@ def log_transaction(action, symbol, quantity, roc30=None, vwap=None, filename="c
 
 def rebalance_portfolio():
     """Rebalance the portfolio at 0000 UTC, based on BTC 50MA condition."""
-    current_time_utc = datetime.now(
-        timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    current_time_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # 1) Load the portfolio (the coins we previously bought under this strategy)
     portfolio = load_json_file(filename="top_coins.json")
@@ -408,6 +407,7 @@ def rebalance_portfolio():
 
             # Clear the file
             save_json_file([])
+            save_json_file({}, filename='pending_orders.json')
             send_telegram_alert("All positions sold. Portfolio file cleared.")
         else:
             send_telegram_alert(f"[{current_time_utc}] BTC < 50MA, but portfolio file is empty. No action needed.")
@@ -426,6 +426,7 @@ def rebalance_portfolio():
     # 4) Market-sell any coin that's in the file but not in today's top 10
     coins_to_sell = [symbol for symbol in portfolio_dict if symbol not in new_symbols]
     if coins_to_sell:
+        pending_orders = load_json_file(filename="pending_orders.json")
         sell_message = f"Selling positions not in today's Top 10 ({current_time_utc}):\n"
         for symbol in coins_to_sell:
             qty = portfolio_dict[symbol]["quantity"]
@@ -438,9 +439,11 @@ def rebalance_portfolio():
                 )
                 sell_message += f"- SOLD {symbol} x {qty}\n"
                 del portfolio_dict[symbol]
+                del pending_orders[symbol]
                 log_transaction("SELL", symbol, qty)
             except Exception as e:
                 sell_message += f"- Error selling {symbol}: {e}\n"
+        save_json_file(pending_orders, "pending_orders.json")
         send_telegram_alert(sell_message)
 
     # 5) Market-buy any new coins that are in today's top 10 but not in the file
