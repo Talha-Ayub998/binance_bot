@@ -132,8 +132,8 @@ def calculate_roc30(data):
     """
     Calculate the 30-day Rate of Change (ROC) for the latest available day.
     """
-    latest_close = data['close'].iloc[-1]
-    old_close = data['close'].shift(30).iloc[-1]
+    latest_close = data['close'].iloc[-2]
+    old_close = data['close'].iloc[-32]
     if pd.isna(old_close):
         return None
     return ((latest_close - old_close) / old_close) * 100
@@ -169,12 +169,11 @@ def get_top_10_coins_usdt():
         filtered_coins = []
         for symbol in symbols:
             try:
-                data = fetch_ohlcv(symbol, interval="1d",
-                                lookback="31 days ago UTC")
-                # Skip if data has less than 30 rows
-                if len(data) < 30:
+                data = fetch_ohlcv(symbol, interval="1d", lookback="32 days ago UTC")
+                # Skip if data has less than 32 rows (including current date)
+                if len(data) < 32:
                     print_log(
-                        f"{symbol}: Insufficient data (less than 30 days). Skipping...")
+                        f"{symbol}: Insufficient data (less than 32 days including current day). Skipping...")
                     continue
                 roc30 = calculate_roc30(data)
                 volume = data['volume'][-7:].sum()
