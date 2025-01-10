@@ -289,8 +289,7 @@ def send_order_summary_notification(order_summary):
 
     if not order_summary:
         # Graceful handling for an empty summary (just in case)
-        send_telegram_alert(f"Order Monitoring Summary ({
-                            current_time}): No actions to report.")
+        send_telegram_alert(f"Order Monitoring Summary ({current_time}): No actions to report.")
         return
 
     if all(details.get("Action") == "Already Filled" for details in order_summary.values()):
@@ -542,7 +541,7 @@ def log_transaction(action, symbol, quantity, roc30=None, vwap=None, filename="c
 def sell_all_positions(portfolio, all_orders_summary={}):
     current_time_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     if portfolio:
-        send_telegram_alert(f"[{current_time_utc}] BTC < 50MA → Selling all positions in the file.")
+        send_telegram_alert(f"[{current_time_utc}] BTC < 50MA → Selling all positions.")
 
         updated_portfolio = portfolio.copy()  # Create a copy of the portfolio
         for pos in portfolio:
@@ -580,10 +579,11 @@ def sell_all_positions(portfolio, all_orders_summary={}):
 
         # Send consolidated notification after processing all sells
         send_batch_telegram_alert(all_orders_summary)
-        send_telegram_alert("BTC < 50MA → Positions processed, and portfolio file updated.")
+        send_telegram_alert("BTC < 50MA → All positions processed and portfolio updated.")
 
     else:
-        send_telegram_alert(f"[{current_time_utc}] BTC < 50MA, but portfolio file is empty. No action needed.")
+        send_telegram_alert(
+            f"[{current_time_utc}] BTC < 50MA → No positions found to sell. No action needed.")
 
     return
 
@@ -725,7 +725,7 @@ def rebalance_portfolio():
     save_json_file(updated_portfolio, "top_coins.json")
     # Send consolidated notification
     send_batch_telegram_alert(all_orders_summary)
-    send_telegram_alert("Rebalance complete. Portfolio file updated.")
+    send_telegram_alert("Rebalance complete. Portfolio successfully updated.")
 
 
 if __name__ == "__main__":
