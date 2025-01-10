@@ -35,6 +35,7 @@ PORTFOLIO_VALUE = 100  # Example portfolio value
 TOP_N_COINS = 10
 # Global dictionary to track orders
 orders = {}
+is_paused = False  # Global flag to control scheduling
 
 
 def send_telegram_alert(message):
@@ -356,6 +357,9 @@ def send_batch_telegram_alert(all_orders_summary, portfolio_balance=None):
 def monitor_orders(filename="pending_orders.json"):
     """Check all open orders at 12 PM UTC and convert unfilled orders to market orders."""
     try:
+        if is_paused:
+            print("Order monitoring skipped because tasks are paused.")
+            return
         # Load pending orders from file
         pending_orders = load_json_file(filename)
         order_summary = {}
@@ -451,12 +455,7 @@ def save_json_file(portfolio, filename="top_coins.json"):
 
 
 def handle_telegram_commands():
-    """
-    Listen for Telegram commands and execute actions.
-    Commands:
-    - /buy_all: Manually buy all positions (align strategy to buy all top 10 coins).
-    - /sell_all: Manually sell all positions (align strategy to sell all positions).
-    """
+    global is_paused
     offset = None  # Tracks the last processed update
 
     while True:
@@ -476,13 +475,17 @@ def handle_telegram_commands():
                         print(f"Received command: {command}")
 
                         # Process commands
-                        if command == "/buy_all":
+                        if command == "/start":
+                            send_telegram_alert("Going to run Rebalance Portfolio")
                             rebalance_portfolio()
-                            send_telegram_alert("Manual override: Buying all positions.")
-                            # manual_override("BUY")
-                        elif command == "/sell_all":
+                        elif command == "/stop":
                             send_telegram_alert("Manual override: Selling all positions.")
-                            # manual_override("SELL")
+                            portfolio = load_json_file(filename="top_coins.json")
+                            sell_all_positions(portfolio)
+                            is_paused = True  # Pause the tasks
+                        elif command == "/restart":
+                            send_telegram_alert("Manual override: Resuming all scheduled tasks.")
+                            is_paused = False  # Resume the tasks
                         else:
                             send_telegram_alert(f"Unknown command: {command}")
 
@@ -529,8 +532,62 @@ def log_transaction(action, symbol, quantity, roc30=None, vwap=None, filename="c
         print_log(f"log_transaction {e}")
 
 
+def sell_all_positions(portfolio, all_orders_summary={}):
+    current_time_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    if portfolio:
+        send_telegram_alert(f"[{current_time_utc}] BTC < 50MA → Selling all positions in the file.")
+
+        updated_portfolio = portfolio.copy()  # Create a copy of the portfolio
+        for pos in portfolio:
+            symbol = pos["symbol"]
+            quantity = pos["quantity"]
+            # Attempt to place a Market SELL order
+            try:
+                sell_order = client.create_order(
+                    symbol=symbol,
+                    side="SELL",
+                    type=Client.ORDER_TYPE_MARKET,
+                    quantity=round_quantity(symbol, quantity)
+                )
+                all_orders_summary[symbol] = {
+                    "Side": "SELL",
+                    "Quantity": quantity,
+                    "Price": "Market",
+                    "Order ID": sell_order["orderId"],
+                    "Status": sell_order.get("status", "FILLED")
+                }
+                log_transaction("SELL", symbol, quantity)
+                # Remove the successfully processed position from the portfolio
+                updated_portfolio.remove(pos)
+
+            except Exception as e:
+                all_orders_summary[symbol] = {
+                    "Side": "SELL",
+                    "Error": str(e)
+                }
+                send_telegram_alert(f"Failed to place SELL order for {symbol}: {str(e)}")
+
+        # Save the updated portfolio (removing successful sales only)
+        save_json_file(updated_portfolio)
+        save_json_file({}, filename='pending_orders.json')
+
+        # Send consolidated notification after processing all sells
+        send_batch_telegram_alert(all_orders_summary)
+        send_telegram_alert("BTC < 50MA → Positions processed, and portfolio file updated.")
+
+    else:
+        send_telegram_alert(f"[{current_time_utc}] BTC < 50MA, but portfolio file is empty. No action needed.")
+
+    return
+
+
 def rebalance_portfolio():
     """Rebalance the portfolio at 0000 UTC, based on BTC 50MA condition."""
+
+    if is_paused:
+        print("Rebalancing skipped because tasks are paused.")
+        return
+
     current_time_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     all_orders_summary = {}
 
@@ -542,53 +599,7 @@ def rebalance_portfolio():
         # -----------------------------------------------------------------------
         # BTC BELOW 50MA → Market-Sell All from the file
         # -----------------------------------------------------------------------
-        if portfolio:
-            send_telegram_alert(f"[{current_time_utc}] BTC < 50MA → Selling all positions in the file.")
-
-            updated_portfolio = portfolio.copy()  # Create a copy of the portfolio
-            for pos in portfolio:
-                symbol = pos["symbol"]
-                quantity = pos["quantity"]
-                # Attempt to place a Market SELL order
-                try:
-                    sell_order = client.create_order(
-                        symbol=symbol,
-                        side="SELL",
-                        type=Client.ORDER_TYPE_MARKET,
-                        quantity=round_quantity(symbol, quantity)
-                    )
-                    all_orders_summary[symbol] = {
-                        "Side": "SELL",
-                        "Quantity": quantity,
-                        "Price": "Market",
-                        "Order ID": sell_order["orderId"],
-                        "Status": sell_order.get("status", "FILLED")
-                    }
-                    log_transaction("SELL", symbol, quantity)
-
-                    # Remove the successfully processed position from the portfolio
-                    updated_portfolio.remove(pos)
-
-                except Exception as e:
-                    all_orders_summary[symbol] = {
-                        "Side": "SELL",
-                        "Error": str(e)
-                    }
-                    send_telegram_alert(f"Failed to place SELL order for {symbol}: {str(e)}")
-
-            # Save the updated portfolio (removing successful sales only)
-            save_json_file(updated_portfolio)
-            save_json_file({}, filename='pending_orders.json')
-
-            # Send consolidated notification after processing all sells
-            send_batch_telegram_alert(all_orders_summary)
-            send_telegram_alert("BTC < 50MA → Positions processed, and portfolio file updated.")
-
-        else:
-            send_telegram_alert(
-                f"[{current_time_utc}] BTC < 50MA, but portfolio file is empty. No action needed."
-            )
-
+        sell_all_positions(portfolio)
         return
 
     # -----------------------------------------------------------------------
@@ -717,5 +728,6 @@ if __name__ == "__main__":
     schedule.every().day.at("12:00").do(monitor_orders)
 
     while True:
-        schedule.run_pending()
-        time.sleep(60)
+        if not is_paused:  # Only run tasks if not paused
+            schedule.run_pending()
+        time.sleep(60)  # Check every minute
