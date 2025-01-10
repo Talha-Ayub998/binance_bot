@@ -358,7 +358,7 @@ def monitor_orders(filename="pending_orders.json"):
     """Check all open orders at 12 PM UTC and convert unfilled orders to market orders."""
     try:
         if is_paused:
-            print("Order monitoring skipped because tasks are paused.")
+            send_telegram_alert(f"Order monitoring skipped because tasks are paused.")
             return
         # Load pending orders from file
         pending_orders = load_json_file(filename)
@@ -472,28 +472,35 @@ def handle_telegram_commands():
                     offset = update["update_id"] + 1
                     if "message" in update and "text" in update["message"]:
                         command = update["message"]["text"].strip()
-                        print(f"Received command: {command}")
+                        print_log(f"Received command: {command}")
 
                         # Process commands
                         if command == "/start":
-                            send_telegram_alert("Going to run Rebalance Portfolio")
+                            send_telegram_alert(
+                                "Rebalance Portfolio initiated and all scheduled tasks resumed (if previously stopped)."
+                            )
+                            is_paused = False  # Resume the tasks
                             rebalance_portfolio()
                         elif command == "/stop":
-                            send_telegram_alert("Manual override: Selling all positions.")
+                            send_telegram_alert(
+                                "Manual override: Selling all positions and pausing all scheduled tasks."
+                            )
                             portfolio = load_json_file(filename="top_coins.json")
                             sell_all_positions(portfolio)
                             is_paused = True  # Pause the tasks
+
                         elif command == "/restart":
                             send_telegram_alert("Manual override: Resuming all scheduled tasks.")
                             is_paused = False  # Resume the tasks
+
                         else:
-                            send_telegram_alert(f"Unknown command: {command}")
+                            send_telegram_alert(f"Unknown command received: {command}")
 
             else:
-                print(f"Error fetching Telegram updates: {response.text}")
+                print_log(f"Error fetching Telegram updates: {response.text}")
 
         except requests.exceptions.RequestException as e:
-            print(f"Error in Telegram communication: {e}")
+            print_log(f"Error in Telegram communication: {e}")
 
         time.sleep(1)  # Avoid spamming Telegram API
 
@@ -585,7 +592,7 @@ def rebalance_portfolio():
     """Rebalance the portfolio at 0000 UTC, based on BTC 50MA condition."""
 
     if is_paused:
-        print("Rebalancing skipped because tasks are paused.")
+        send_telegram_alert(f"Rebalancing skipped because tasks are paused.")
         return
 
     current_time_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
