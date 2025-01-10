@@ -234,8 +234,8 @@ def round_price(symbol, price):
     return price
 
 
-def place_vwap_order(symbol, side, allocation, vwap):
-    """Place limit order at VWAP and save to pending orders file."""
+def place_vwap_order(symbol, side, allocation, vwap, all_orders_summary):
+    """Place limit order at VWAP and add summary to the provided summary dictionary."""
     try:
         # Fetch VWAP and calculate quantity/price
         price = vwap if side == "BUY" else vwap * 1.02
@@ -254,7 +254,14 @@ def place_vwap_order(symbol, side, allocation, vwap):
             quantity=quantity,
             price=f"{price:.8f}"
         )
-        send_telegram_alert(f"{side} order placed at VWAP for {symbol}: Quantity={quantity}, Price={price:.2f}, Order Details={order}")
+        # Append order details to the summary
+        all_orders_summary[symbol] = {
+            "Side": side,
+            "Quantity": quantity,
+            "Price": f"{price:.2f}",
+            "Order ID": order["orderId"],
+            "Status": order.get("status", "PENDING")
+        }
 
         # Load and update the pending orders file
         pending_orders = load_json_file(filename='pending_orders.json')
@@ -267,7 +274,83 @@ def place_vwap_order(symbol, side, allocation, vwap):
         save_json_file(pending_orders, "pending_orders.json")
 
     except Exception as e:
-        send_telegram_alert(f"Error placing VWAP order for {symbol}: {e}")
+        # Log error in the summary
+        all_orders_summary[symbol] = {
+            "Side": side,
+            "Error": str(e)
+        }
+
+
+def send_order_summary_notification(order_summary):
+    """Send a user-friendly summary notification for monitored orders."""
+    # Get the current time in UTC
+    current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    if not order_summary:
+        # Graceful handling for an empty summary (just in case)
+        send_telegram_alert(f"Order Monitoring Summary ({
+                            current_time}): No actions to report.")
+        return
+
+    if all(details.get("Action") == "Already Filled" for details in order_summary.values()):
+        # Special case: All orders are already filled
+        message = f"Order Monitoring Summary ({current_time}):\n\n"
+        message += "STRATEGY POSITIONS:\n"
+        message += "{:<15} {:<15} {:<15} {:<15}\n".format(
+            "Coin", "Quantity", "Filled Price", "Broker Status"
+        )
+        for symbol, details in order_summary.items():
+            message += "{:<15} {:<15} {:<15} {:<15}\n".format(
+                symbol, "-", "-", "FILLED"
+            )
+        send_telegram_alert(message)
+    else:
+        # General case: Mixed actions
+        message = f"Order Monitoring Summary ({current_time}):\n\n"
+        message += "STRATEGY POSITIONS:\n"
+        message += "{:<15} {:<15}{:<15} {:<15}\n".format(
+            "Coin", "Quantity", "Filled Price", "Broker Status"
+        )
+        for symbol, details in order_summary.items():
+            if "Error Message" in details:
+                message += f"{symbol}: ERROR - {details['Error Message']}\n"
+            else:
+                message += "{:<15} {:<15} {:<15} {:<15}\n".format(
+                    symbol,
+                    details.get("Quantity", "-"),
+                    details.get("Price", "-"),
+                    details.get("Status", "-")
+                )
+        send_telegram_alert(message)
+
+
+def send_batch_telegram_alert(all_orders_summary, portfolio_balance=None):
+    """Send a user-friendly Telegram alert summarizing all orders."""
+    # Get the current time in UTC
+    current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    message = f"Rebalance Orders Summary ({current_time}):\n\n"
+    message += "STRATEGY POSITIONS:\n"
+    message += "{:<15} {:<15} {:<15} {:<15}\n".format(
+        "Coin", "Quantity", "Filled Price", "Broker Status"
+    )
+
+    for symbol, details in all_orders_summary.items():
+        if "Error" in details:
+            message += f"{symbol}: ERROR - {details['Error']}\n"
+        else:
+            message += "{:<15} {:<15} {:<15} {:<15}\n".format(
+                symbol,
+                details.get("Quantity", "-"),
+                details.get("Price", "-"),
+                details.get("Status", "-")
+            )
+
+    if portfolio_balance is not None:
+        message += f"\nREBALANCE COMPLETE:\nPortfolio Balance: ${
+            portfolio_balance:.2f}"
+
+    send_telegram_alert(message)
 
 
 def monitor_orders(filename="pending_orders.json"):
@@ -275,6 +358,7 @@ def monitor_orders(filename="pending_orders.json"):
     try:
         # Load pending orders from file
         pending_orders = load_json_file(filename)
+        order_summary = {}
 
         for symbol, order in list(pending_orders.items()):
             try:
@@ -299,24 +383,50 @@ def monitor_orders(filename="pending_orders.json"):
                             type=Client.ORDER_TYPE_MARKET,
                             quantity=round_quantity(symbol, remaining_quantity)
                         )
-                        send_telegram_alert(f"{order['side']} market order placed for {symbol}: {market_order}")
+                        order_summary[symbol] = {
+                            "Action": "Market Order Placed",
+                            "Side": order['side'],
+                            "Quantity": remaining_quantity,
+                            "Price": "Market",
+                            "Order ID": market_order['orderId'],
+                            "Status": market_order.get('status', 'FILLED')
+                        }
+                    else:
+                        order_summary[symbol] = {
+                            "Action": "No Remaining Quantity",
+                            "Status": "Skipped"
+                        }
 
                     # Remove the order from the tracking file
                     del pending_orders[symbol]
 
                 elif order_status['status'] == 'FILLED':
                     # If the order is already filled, no further action is required
-                    send_telegram_alert(f"Order {order['orderId']} for {symbol} is already filled.")
+                    order_summary[symbol] = {
+                        "Action": "Already Filled",
+                        "Order ID": order['orderId']
+                    }
                     del pending_orders[symbol]
 
                 else:
-                    send_telegram_alert(f"Order {order['orderId']} for {symbol} is in status: {order_status['status']}. No action taken.")
+                    order_summary[symbol] = {
+                        "Action": "No Action Taken",
+                        "Status": order_status['status']
+                    }
 
             except Exception as e:
-                send_telegram_alert(f"Error checking order for {symbol}: {e}")
+                order_summary[symbol] = {
+                    "Action": "Error",
+                    "Error Message": str(e)
+                }
 
         # Save the updated pending orders file
         save_json_file(pending_orders, "pending_orders.json")
+        if not order_summary:
+            send_telegram_alert(
+                "Order Monitoring Summary: No pending orders in the file. No actions required.")
+            return
+        send_order_summary_notification(order_summary)
 
     except Exception as e:
         send_telegram_alert(f"Error monitoring orders: {e}")
@@ -338,6 +448,51 @@ def load_json_file(filename="top_coins.json"):
 def save_json_file(portfolio, filename="top_coins.json"):
     with open(filename, "w") as f:
         json.dump(portfolio, f, indent=2)
+
+
+def handle_telegram_commands():
+    """
+    Listen for Telegram commands and execute actions.
+    Commands:
+    - /buy_all: Manually buy all positions (align strategy to buy all top 10 coins).
+    - /sell_all: Manually sell all positions (align strategy to sell all positions).
+    """
+    offset = None  # Tracks the last processed update
+
+    while True:
+        try:
+            # Fetch updates from Telegram
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+            params = {"timeout": 10, "offset": offset}
+            response = requests.get(url, params=params)
+
+            # Handle successful responses
+            if response.status_code == 200:
+                updates = response.json().get("result", [])
+                for update in updates:
+                    offset = update["update_id"] + 1
+                    if "message" in update and "text" in update["message"]:
+                        command = update["message"]["text"].strip()
+                        print(f"Received command: {command}")
+
+                        # Process commands
+                        if command == "/buy_all":
+                            rebalance_portfolio()
+                            send_telegram_alert("Manual override: Buying all positions.")
+                            # manual_override("BUY")
+                        elif command == "/sell_all":
+                            send_telegram_alert("Manual override: Selling all positions.")
+                            # manual_override("SELL")
+                        else:
+                            send_telegram_alert(f"Unknown command: {command}")
+
+            else:
+                print(f"Error fetching Telegram updates: {response.text}")
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error in Telegram communication: {e}")
+
+        time.sleep(1)  # Avoid spamming Telegram API
 
 
 def log_transaction(action, symbol, quantity, roc30=None, vwap=None, filename="coin_transactions.csv"):
@@ -377,6 +532,7 @@ def log_transaction(action, symbol, quantity, roc30=None, vwap=None, filename="c
 def rebalance_portfolio():
     """Rebalance the portfolio at 0000 UTC, based on BTC 50MA condition."""
     current_time_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    all_orders_summary = {}
 
     # 1) Load the portfolio (the coins we previously bought under this strategy)
     portfolio = load_json_file(filename="top_coins.json")
@@ -388,10 +544,12 @@ def rebalance_portfolio():
         # -----------------------------------------------------------------------
         if portfolio:
             send_telegram_alert(f"[{current_time_utc}] BTC < 50MA → Selling all positions in the file.")
+
+            updated_portfolio = portfolio.copy()  # Create a copy of the portfolio
             for pos in portfolio:
                 symbol = pos["symbol"]
                 quantity = pos["quantity"]
-                # Market SELL the entire quantity
+                # Attempt to place a Market SELL order
                 try:
                     sell_order = client.create_order(
                         symbol=symbol,
@@ -399,17 +557,38 @@ def rebalance_portfolio():
                         type=Client.ORDER_TYPE_MARKET,
                         quantity=round_quantity(symbol, quantity)
                     )
-                    send_telegram_alert(f"Market SELL for {symbol} x {quantity}. Order={sell_order}")
+                    all_orders_summary[symbol] = {
+                        "Side": "SELL",
+                        "Quantity": quantity,
+                        "Price": "Market",
+                        "Order ID": sell_order["orderId"],
+                        "Status": sell_order.get("status", "FILLED")
+                    }
                     log_transaction("SELL", symbol, quantity)
-                except Exception as e:
-                    send_telegram_alert(f"Error selling {symbol}: {e}")
 
-            # Clear the file
-            save_json_file([])
+                    # Remove the successfully processed position from the portfolio
+                    updated_portfolio.remove(pos)
+
+                except Exception as e:
+                    all_orders_summary[symbol] = {
+                        "Side": "SELL",
+                        "Error": str(e)
+                    }
+                    send_telegram_alert(f"Failed to place SELL order for {symbol}: {str(e)}")
+
+            # Save the updated portfolio (removing successful sales only)
+            save_json_file(updated_portfolio)
             save_json_file({}, filename='pending_orders.json')
-            send_telegram_alert("All positions sold. Portfolio file cleared.")
+
+            # Send consolidated notification after processing all sells
+            send_batch_telegram_alert(all_orders_summary)
+            send_telegram_alert("BTC < 50MA → Positions processed, and portfolio file updated.")
+
         else:
-            send_telegram_alert(f"[{current_time_utc}] BTC < 50MA, but portfolio file is empty. No action needed.")
+            send_telegram_alert(
+                f"[{current_time_utc}] BTC < 50MA, but portfolio file is empty. No action needed."
+            )
+
         return
 
     # -----------------------------------------------------------------------
@@ -436,7 +615,13 @@ def rebalance_portfolio():
                     type=Client.ORDER_TYPE_MARKET,
                     quantity=round_quantity(symbol, qty)
                 )
-                sell_message += f"- SOLD {symbol}, {qty} & Order detials:{sell_order}\n"
+                all_orders_summary[symbol] = {
+                    "Side": "SELL",
+                    "Quantity": qty,
+                    "Price": "Market",
+                    "Order ID": sell_order["orderId"],
+                    "Status": sell_order.get("status", "FILLED")
+                }
                 del portfolio_dict[symbol]
 
                 # Safely remove the symbol from pending_orders
@@ -445,8 +630,10 @@ def rebalance_portfolio():
 
                 log_transaction("SELL", symbol, qty)
             except Exception as e:
-                sell_message += f"- Error selling {symbol}: {e}\n"
-                print_log(f"Error while placing the SELL order (From file)")
+                all_orders_summary[symbol] = {
+                    "Side": "SELL",
+                    "Error": str(e)
+                }
         save_json_file(pending_orders, "pending_orders.json")
         send_telegram_alert(sell_message)
 
@@ -495,27 +682,37 @@ def rebalance_portfolio():
                     side="BUY",
                     allocation=allocation_per_coin,
                     vwap=data["vwap"],
+                    all_orders_summary=all_orders_summary
                 )
 
-                # Update the portfolio dictionary
-                portfolio_dict[symbol] = {
-                    "symbol": symbol,
-                    "quantity": data["quantity"],
-                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                }
+                # Check if the order was successfully added to the summary
+                if symbol in all_orders_summary and "Error" not in all_orders_summary[symbol]:
+                    # Update the portfolio dictionary only if the order was successful
+                    portfolio_dict[symbol] = {
+                        "symbol": symbol,
+                        "quantity": data["quantity"],
+                        "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                    }
+                else:
+                    raise Exception(f"Order placement for {symbol} failed. Error details: {
+                                    all_orders_summary.get(symbol, 'Unknown Error')}")
             except Exception as e:
-                print_log(f"Error while placing the BUY order")
-    else:
-        send_telegram_alert("Already holding today's Top 10. No buys needed.")
+                all_orders_summary[symbol] = {
+                    "Side": "BUY",
+                    "Error": str(e)
+                }
 
     # 6) Save the updated portfolio (convert dict back to list)
     updated_portfolio = list(portfolio_dict.values())
     save_json_file(updated_portfolio, "top_coins.json")
+    # Send consolidated notification
+    send_batch_telegram_alert(all_orders_summary)
     send_telegram_alert("Rebalance complete. Portfolio file updated.")
 
 
 if __name__ == "__main__":
-    rebalance_portfolio()
+    # rebalance_portfolio()
+    threading.Thread(target=handle_telegram_commands, daemon=True).start()
     schedule.every().day.at("00:00").do(rebalance_portfolio)
     schedule.every().day.at("12:00").do(monitor_orders)
 
