@@ -624,7 +624,8 @@ def handle_telegram_commands():
                         elif command == "/restart":
                             send_telegram_alert("Manual override: Resuming all scheduled tasks.")
                             is_paused = False  # Resume the tasks
-
+                        elif command == "/graph":
+                            daily_portfolio_task()
                         else:
                             send_telegram_alert(f"Unknown command received: {command}")
 
