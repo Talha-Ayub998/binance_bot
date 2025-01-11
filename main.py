@@ -472,7 +472,7 @@ def generate_cumulative_graph(image_path="portfolio_graph.png"):
     # Plot the data
     plt.figure(figsize=(10, 6))
     plt.plot(dates, values, marker="o", linestyle="-")
-    plt.title("Portfolio Value Over Time")
+    plt.title("Day Start Portfolio Value Over Time")
     plt.xlabel("Date")
     plt.ylabel("Portfolio Value (USDT)")
     plt.xticks(rotation=45)
