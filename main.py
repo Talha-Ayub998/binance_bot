@@ -12,6 +12,7 @@ import json
 import os
 from dotenv import load_dotenv
 from pathlib import Path
+import matplotlib.pyplot as plt
 
 # Load the .env file
 load_dotenv()
@@ -38,14 +39,28 @@ orders = {}
 is_paused = False  # Global flag to control scheduling
 
 
-def send_telegram_alert(message):
-    """Send a Telegram alert."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print_log(f"Error sending Telegram alert: {e}")
+def send_telegram_alert(message=None, image_path=None):
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+    # Send a text message if provided
+    if message:
+        url = f"{base_url}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        try:
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            print_log(f"Error sending Telegram message: {e}")
+
+    # Send an image if provided
+    if image_path:
+        url = f"{base_url}/sendPhoto"
+        try:
+            with open(image_path, "rb") as image:
+                files = {"photo": image}
+                payload = {"chat_id": TELEGRAM_CHAT_ID}
+                requests.post(url, data=payload, files=files, timeout=10)
+        except Exception as e:
+            print_log(f"Error sending Telegram image: {e}")
 
 
 def get_folder_logger():
@@ -347,10 +362,128 @@ def send_batch_telegram_alert(all_orders_summary, portfolio_balance=None):
             )
 
     if portfolio_balance is not None:
-        message += f"\nREBALANCE COMPLETE:\nPortfolio Balance: ${
-            portfolio_balance:.2f}"
+        message += f"\nREBALANCE COMPLETE:\nPortfolio Balance: ${portfolio_balance:.2f}"
 
     send_telegram_alert(message)
+
+
+def get_portfolio_value():
+    try:
+        # Get account balances
+        account_info = client.get_account()
+        balances = account_info['balances']
+        # Get current prices
+        prices = {item['symbol']: float(item['price'])
+                  for item in client.get_all_tickers()}
+        # Initialize portfolio details
+        portfolio_details = []
+        total_value = 0
+        for balance in balances:
+            asset = balance['asset']
+            free_amount = float(balance['free'])
+            locked_amount = float(balance['locked'])
+            total_amount = free_amount + locked_amount
+            if total_amount > 0:  # Only consider assets with a non-zero balance
+                asset_value = 0
+                if asset == 'USDT':  # USDT is already in USD
+                    asset_value = total_amount
+                else:
+                    symbol = f"{asset}USDT"
+                    if symbol in prices:
+                        asset_value = total_amount * prices[symbol]
+
+                total_value += asset_value
+                # portfolio_details.append({
+                #     "asset": asset,
+                #     "free": free_amount,
+                #     "locked": locked_amount,
+                #     "total": total_amount,
+                #     "value_usd": asset_value
+                # })
+        return round(total_value, 2)
+            # "portfolio_breakdown": portfolio_details
+    except Exception as e:
+        print(f"Error occurred while calculating portfolio value: {e}")
+        return None
+
+
+def record_daily_portfolio_value():
+    portfolio_value = get_portfolio_value()  # Call the function to get the value
+    if portfolio_value is None:
+        print("Failed to record portfolio value.")
+        return
+
+    # File to store daily values
+    file_path = "portfolio_values.json"
+
+    # Load existing data if the file exists
+    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+        with open(file_path, "r") as file:
+            try:
+                data = json.load(file)
+            except json.JSONDecodeError as e:
+                print(f"Error reading JSON: {e}")
+                data = []  # Initialize with an empty list if the file is corrupted
+    else:
+        data = []
+
+    # Add today's portfolio value only if today's date is not already in the file
+    today = datetime.now().strftime("%Y-%m-%d")
+    if any(entry["date"] == today for entry in data):
+        print(f"Portfolio value for {today} is already recorded. Skipping.")
+        return
+
+    # Add today's portfolio value
+    data.append({"date": today, "value": portfolio_value})
+
+    # Save updated data
+    with open(file_path, "w") as file:
+        json.dump(data, file, indent=4)
+
+    print(f"Portfolio value for {today} recorded: ${portfolio_value}")
+
+def generate_cumulative_graph(image_path="portfolio_graph.png"):
+    file_path = "portfolio_values.json"
+
+    if not os.path.exists(file_path):
+        print("No data available to plot.")
+        return
+
+    # Load data
+    with open(file_path, "r") as file:
+        try:
+            data = json.load(file)
+        except json.JSONDecodeError:
+            print("Invalid or corrupted data file. No graph will be generated.")
+            return
+
+    if not data:
+        print("Data file is empty. No graph will be generated.")
+        return
+
+    # Extract dates and values
+    dates = [item["date"] for item in data]
+    values = [item["value"] for item in data]
+
+    if not dates or not values:
+        print("No valid data to plot.")
+        return
+
+    # Plot the data
+    plt.figure(figsize=(10, 6))
+    plt.plot(dates, values, marker="o", linestyle="-")
+    plt.title("Portfolio Value Over Time")
+    plt.xlabel("Date")
+    plt.ylabel("Portfolio Value (USDT)")
+    plt.xticks(rotation=45)
+    plt.grid(True)
+    plt.tight_layout()
+
+    # Save the graph as an image
+    plt.savefig(image_path)
+    plt.close()
+    print(f"Graph saved as {image_path}")
+    send_telegram_alert(image_path="portfolio_graph.png")
 
 
 def monitor_orders(filename="pending_orders.json"):
@@ -588,6 +721,10 @@ def sell_all_positions(portfolio, all_orders_summary={}):
     return
 
 
+def daily_portfolio_task():
+    record_daily_portfolio_value()
+    generate_cumulative_graph()
+
 def rebalance_portfolio():
     """Rebalance the portfolio at 0000 UTC, based on BTC 50MA condition."""
 
@@ -731,7 +868,8 @@ def rebalance_portfolio():
 if __name__ == "__main__":
     # rebalance_portfolio()
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
-    schedule.every().day.at("00:00").do(rebalance_portfolio)
+    schedule.every().day.at("00:00").do(daily_portfolio_task)
+    schedule.every().day.at("00:01").do(rebalance_portfolio)
     schedule.every().day.at("12:00").do(monitor_orders)
 
     while True:
