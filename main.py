@@ -272,10 +272,15 @@ def place_vwap_order(symbol, side, allocation, vwap, all_orders_summary):
         )
         # Append order details to the summary
         all_orders_summary[symbol] = {
-            "Side": side,
-            "Quantity": quantity,
-            "Price": f"{price:.2f}",
+            "Symbol": symbol,
+            "Action": side,
+            "Strategy Quantity": quantity,
+            "Binance Quantity": order.get("executedQty", 0),
+            "Strategy Price": f"{price:.2f}",
+            "Filled": order.get("fills")[0].get("price") if order.get("fills") else "-",
+            "Cost": float(quantity) * float(price),
             "Order ID": order["orderId"],
+            "Live": (get_live_price(symbol) or 0) * quantity,
             "Status": order.get("status", "PENDING")
         }
 
@@ -290,53 +295,91 @@ def place_vwap_order(symbol, side, allocation, vwap, all_orders_summary):
         save_json_file(pending_orders, "pending_orders.json")
 
     except Exception as e:
-        # Log error in the summary
+        # Log error in the summary with the same structure
         all_orders_summary[symbol] = {
-            "Side": side,
-            "Error": str(e)
+            "Symbol": symbol,
+            "Action": side,
+            "Strategy Quantity": allocation / vwap,
+            "Binance Quantity": 0,
+            "Strategy Price": f"{vwap:.2f}",
+            "Filled": "-",
+            "Cost": 0,
+            "Order ID": "-",
+            "Live": 0,
+            "Status": f"ERROR: {str(e)}"
         }
 
 
-def send_order_summary_notification(order_summary):
+def send_order_summary_notification(order_summary, portfolio_balance=None):
     """Send a user-friendly summary notification for monitored orders."""
     # Get the current time in UTC
     current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     if not order_summary:
         # Graceful handling for an empty summary (just in case)
-        send_telegram_alert(f"Order Monitoring Summary ({current_time}): No actions to report.")
+        send_telegram_alert(
+            f"📋 *Order Monitoring Summary* ({current_time}): No actions to report.")
         return
 
     if all(details.get("Action") == "Already Filled" for details in order_summary.values()):
         # Special case: All orders are already filled
-        message = f"Order Monitoring Summary ({current_time}):\n\n"
-        message += "STRATEGY POSITIONS:\n"
-        message += "{:<15} {:<15} {:<15} {:<15}\n".format(
-            "Coin", "Quantity", "Filled Price", "Broker Status"
+        message = f"📋 *Order Monitoring Summary* ({current_time}):\n\n"
+        message += (
+            "```\n"
+            f"{'Symbol':<10} {'Action':<10} {'Strategy Qty':>15} {'Binance Qty':>15} "
+            f"{'Price':>10} {'Cost':>15} {'Order ID':>15} {'Live Value':>12} {'Status':>10}\n"
+            + "-" * 110
+            + "\n"
         )
         for symbol, details in order_summary.items():
-            message += "{:<15} {:<15} {:<15} {:<15}\n".format(
-                symbol, "-", "-", "FILLED"
+            # "Already Filled" case
+            message += (
+                f"\n"
+                f"{symbol:<10} {'Already Filled':<10} {'-':>15} {'-':>15} "
+                f"{'-':>10} {'-':>15} {'-':>15} {'-':>12} {'FILLED':>10}\n"
             )
-        send_telegram_alert(message)
+        message += "\n```"
     else:
         # General case: Mixed actions
-        message = f"Order Monitoring Summary ({current_time}):\n\n"
-        message += "STRATEGY POSITIONS:\n"
-        message += "{:<15} {:<15}{:<15} {:<15}\n".format(
-            "Coin", "Quantity", "Filled Price", "Broker Status"
+        message = f"📋 *Order Monitoring Summary* ({current_time}):\n\n"
+        message += (
+            "```\n"
+            f"{'Symbol':<10} {'Action':<10} {'Strategy Qty':>15} {'Binance Qty':>15} "
+            f"{'Price':>10} {'Cost':>15} {'Order ID':>15} {'Live Value':>12} {'Status':>10}\n"
+            + "-" * 110
+            + "\n"
         )
         for symbol, details in order_summary.items():
             if "Error Message" in details:
-                message += f"{symbol}: ERROR - {details['Error Message']}\n"
+                # Error case
+                message += f"{symbol:<10} ERROR: {details['Error Message']}\n"
             else:
-                message += "{:<15} {:<15} {:<15} {:<15}\n".format(
-                    symbol,
-                    details.get("Quantity", "-"),
-                    details.get("Price", "-"),
-                    details.get("Status", "-")
+                # Extract details with fallbacks for missing fields
+                action = details.get("Action", "-")
+                strategy_qty = details.get("Strategy Quantity", "-")
+                binance_qty = details.get("Binance Quantity", "-")
+                price = details.get("Filled", "-")
+                cost = details.get("Cost", "-")
+                status = details.get("Status", "-")
+                order_id = details.get("Order ID", "-")
+                live_value = details.get("Live", "-")
+
+                # Format the order details
+                message += (
+                    f"{symbol:<10} {action:<10} {strategy_qty:>15} {binance_qty:>15} "
+                    f"{price:>10} {cost:>15} {order_id:>15} {live_value:>12} {status:>10}\n"
                 )
-        send_telegram_alert(message)
+        message += "\n```"
+
+    # Add portfolio balance if provided
+    if portfolio_balance is not None:
+        message += f"\n💼 *Order Monitoring Complete*:\nPortfolio Balance: ${portfolio_balance:.2f}"
+
+    # Add the portfolio value at the end of the message
+    message += "\n\nPortfolio LIVE: " + str(get_portfolio_value())
+
+    # Send the formatted message
+    send_telegram_alert(message)
 
 
 def send_batch_telegram_alert(all_orders_summary, portfolio_balance=None):
@@ -344,26 +387,49 @@ def send_batch_telegram_alert(all_orders_summary, portfolio_balance=None):
     # Get the current time in UTC
     current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    message = f"Rebalance Orders Summary ({current_time}):\n\n"
-    message += "STRATEGY POSITIONS:\n"
-    message += "{:<15} {:<15} {:<15} {:<15}\n".format(
-        "Coin", "Quantity", "Filled Price", "Broker Status"
+    # Start the message with a header
+    message = f"📊 *Rebalance Orders Summary* ({current_time}):\n\n"
+    message += (
+        "```\n"
+        f"{'Symbol':<10} {'Action':<8} {'Strategy Qty':>12} {'Binance Qty':>12} "
+        f"{'Price':>10} {'Cost':>15} {'Order ID':>10} {'Live Value':>12} {'Status':>10}\n"
+        + "-" * 95
+        + "\n"
     )
 
     for symbol, details in all_orders_summary.items():
         if "Error" in details:
-            message += f"{symbol}: ERROR - {details['Error']}\n"
+            # If there's an error, show it in the message
+            message += f"{symbol:<10} ERROR: {details['Error']}\n"
         else:
-            message += "{:<15} {:<15} {:<15} {:<15}\n".format(
-                symbol,
-                details.get("Quantity", "-"),
-                details.get("Price", "-"),
-                details.get("Status", "-")
+            # Extract details with fallbacks for missing fields
+            action = details.get("Action", "-")
+            strategy_qty = details.get("Strategy Quantity", "-")
+            binance_qty = details.get("Binance Quantity", "-")
+            price = details.get("Filled", "-")
+            cost = details.get("Cost", "-")
+            status = details.get("Status", "-")
+            order_id = details.get("Order ID", "-")
+            live_value = details.get("Live", "-")
+
+            # Format the order details
+            message += (
+                f"\n"
+                f"{symbol:<10} {action:<8} {strategy_qty:>12} {binance_qty:>12} "
+                f"{price:>10} {cost:>15} {order_id:>10} {live_value:>12} {status:>10}\n"
             )
 
+    # Add portfolio balance if provided
     if portfolio_balance is not None:
-        message += f"\nREBALANCE COMPLETE:\nPortfolio Balance: ${portfolio_balance:.2f}"
+        message += f"\n💼 *Rebalance Complete*:\nPortfolio Balance: ${portfolio_balance:.2f}"
 
+    # Add the portfolio value at the end of the message
+    message += "\n\nPortfolio LIVE: " + str(get_portfolio_value())
+
+    # End message with closing format
+    message += "\n```"
+
+    # Send the formatted message
     send_telegram_alert(message)
 
 
@@ -490,8 +556,9 @@ def monitor_orders(filename="pending_orders.json"):
     """Check all open orders at 12 PM UTC and convert unfilled orders to market orders."""
     try:
         if is_paused:
-            send_telegram_alert(f"Order monitoring skipped because tasks are paused.")
+            send_telegram_alert("🚫 Order monitoring skipped because tasks are paused.")
             return
+
         # Load pending orders from file
         pending_orders = load_json_file(filename)
         order_summary = {}
@@ -502,6 +569,7 @@ def monitor_orders(filename="pending_orders.json"):
                 order_status = client.get_order(
                     symbol=symbol, orderId=order['orderId']
                 )
+                qty = order_status['executedQty']
 
                 # Handle unfilled or partially filled orders
                 if order_status['status'] in ['NEW', 'PARTIALLY_FILLED']:
@@ -519,17 +587,30 @@ def monitor_orders(filename="pending_orders.json"):
                             type=Client.ORDER_TYPE_MARKET,
                             quantity=round_quantity(symbol, remaining_quantity)
                         )
+                        # Update the summary with all required keys
                         order_summary[symbol] = {
+                            "Symbol": symbol,
                             "Action": "Market Order Placed",
-                            "Side": order['side'],
-                            "Quantity": remaining_quantity,
-                            "Price": "Market",
+                            "Strategy Quantity": order_status['origQty'],
+                            "Binance Quantity": remaining_quantity,
+                            "Filled": "Market",
+                            "Cost": float(remaining_quantity) * float(
+                                market_order.get('fills')[0].get('price', 0)
+                            ) if market_order.get('fills') else 0,
                             "Order ID": market_order['orderId'],
+                            "Live": (get_live_price(symbol) or 0) * qty,
                             "Status": market_order.get('status', 'FILLED')
                         }
                     else:
                         order_summary[symbol] = {
+                            "Symbol": symbol,
                             "Action": "No Remaining Quantity",
+                            "Strategy Quantity": order_status['origQty'],
+                            "Binance Quantity": order_status['executedQty'],
+                            "Filled": "-",
+                            "Cost": 0,
+                            "Order ID": order['orderId'],
+                            "Live": (get_live_price(symbol) or 0) * qty,
                             "Status": "Skipped"
                         }
 
@@ -539,20 +620,44 @@ def monitor_orders(filename="pending_orders.json"):
                 elif order_status['status'] == 'FILLED':
                     # If the order is already filled, no further action is required
                     order_summary[symbol] = {
+                        "Symbol": symbol,
                         "Action": "Already Filled",
-                        "Order ID": order['orderId']
+                        "Strategy Quantity": order_status['origQty'],
+                        "Binance Quantity": order_status['executedQty'],
+                        "Filled": "-",
+                        "Cost": float(order_status['executedQty']) * float(
+                            order_status.get('price', 0)
+                        ) if 'price' in order_status else 0,
+                        "Order ID": order['orderId'],
+                        "Live": (get_live_price(symbol) or 0) * qty,
+                        "Status": "FILLED"
                     }
                     del pending_orders[symbol]
 
                 else:
                     order_summary[symbol] = {
+                        "Symbol": symbol,
                         "Action": "No Action Taken",
+                        "Strategy Quantity": order_status['origQty'],
+                        "Binance Quantity": order_status['executedQty'],
+                        "Filled": "-",
+                        "Cost": 0,
+                        "Order ID": order['orderId'],
+                        "Live": (get_live_price(symbol) or 0) * qty,
                         "Status": order_status['status']
                     }
 
             except Exception as e:
                 order_summary[symbol] = {
+                    "Symbol": symbol,
                     "Action": "Error",
+                    "Strategy Quantity": "-",
+                    "Binance Quantity": "-",
+                    "Filled": "-",
+                    "Cost": 0,
+                    "Order ID": order.get('orderId', "-"),
+                    "Live": 0,
+                    "Status": "ERROR",
                     "Error Message": str(e)
                 }
 
@@ -560,12 +665,14 @@ def monitor_orders(filename="pending_orders.json"):
         save_json_file(pending_orders, "pending_orders.json")
         if not order_summary:
             send_telegram_alert(
-                "Order Monitoring Summary: No pending orders in the file. No actions required.")
+                "📋 Order Monitoring Summary: No pending orders in the file. No actions required."
+            )
             return
+
         send_order_summary_notification(order_summary)
 
     except Exception as e:
-        send_telegram_alert(f"Error monitoring orders: {e}")
+        send_telegram_alert(f"❌ Error monitoring orders: {e}")
 
 
 def load_json_file(filename="top_coins.json"):
@@ -609,25 +716,25 @@ def handle_telegram_commands():
                         # Process commands
                         if command == "/start":
                             send_telegram_alert(
-                                "Rebalance Portfolio initiated and all scheduled tasks resumed (if previously stopped)."
+                                "Rebalance Portfolio initiated and all scheduled tasks resumed (if previously stopped). ✅"
                             )
                             is_paused = False  # Resume the tasks
                             rebalance_portfolio()
                         elif command == "/stop":
                             send_telegram_alert(
-                                "Manual override: Selling all positions and pausing all scheduled tasks."
+                                "Manual override: Selling all positions and pausing all scheduled tasks. ❌"
                             )
                             portfolio = load_json_file(filename="top_coins.json")
                             sell_all_positions(portfolio)
                             is_paused = True  # Pause the tasks
 
                         elif command == "/restart":
-                            send_telegram_alert("Manual override: Resuming all scheduled tasks.")
+                            send_telegram_alert("Manual override: Resuming all scheduled tasks. 🔄")
                             is_paused = False  # Resume the tasks
                         elif command == "/graph":
                             daily_portfolio_task()
                         else:
-                            send_telegram_alert(f"Unknown command received: {command}")
+                            send_telegram_alert(f"Unknown command received: {command} ❓")
 
             else:
                 print_log(f"Error fetching Telegram updates: {response.text}")
@@ -636,6 +743,16 @@ def handle_telegram_commands():
             print_log(f"Error in Telegram communication: {e}")
 
         time.sleep(1)  # Avoid spamming Telegram API
+
+
+def get_live_price(symbol):
+    try:
+        # Fetch ticker price for the given symbol
+        ticker = client.get_symbol_ticker(symbol=symbol)
+        return float(ticker["price"])
+    except Exception as e:
+        print(f"Error fetching live price for {symbol}: {e}")
+        return None
 
 
 def log_transaction(action, symbol, quantity, roc30=None, vwap=None, filename="coin_transactions.csv"):
@@ -675,7 +792,8 @@ def log_transaction(action, symbol, quantity, roc30=None, vwap=None, filename="c
 def sell_all_positions(portfolio, all_orders_summary={}):
     current_time_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     if portfolio:
-        send_telegram_alert(f"[{current_time_utc}] BTC < 50MA → Selling all positions.")
+        send_telegram_alert(
+            f"[{current_time_utc}] BTC < 50MA → Selling all positions. 📉")
 
         updated_portfolio = portfolio.copy()  # Create a copy of the portfolio
         for pos in portfolio:
@@ -690,11 +808,17 @@ def sell_all_positions(portfolio, all_orders_summary={}):
                     quantity=round_quantity(symbol, quantity)
                 )
                 all_orders_summary[symbol] = {
-                    "Side": "SELL",
-                    "Quantity": quantity,
-                    "Price": "Market",
+                    "Symbol": symbol,
+                    "Action": "SELL",
+                    "Strategy Quantity": quantity,
+                    "Binance Quantity": sell_order.get('executedQty', 0),
+                    "Strategy Price": "Market",
+                    "Filled": sell_order.get('fills')[0].get('price') if sell_order.get('fills') else "-",
+                    "Cost": float(sell_order.get('executedQty', 0)) * float(
+                        sell_order.get('fills')[0].get('price')) if sell_order.get('fills') else 0,
                     "Order ID": sell_order["orderId"],
-                    "Status": sell_order.get("status", "FILLED")
+                    "Live": (get_live_price(symbol) or 0) * quantity,
+                    "Status": sell_order.get('status', '-')
                 }
                 log_transaction("SELL", symbol, quantity)
                 # Remove the successfully processed position from the portfolio
@@ -705,7 +829,8 @@ def sell_all_positions(portfolio, all_orders_summary={}):
                     "Side": "SELL",
                     "Error": str(e)
                 }
-                send_telegram_alert(f"Failed to place SELL order for {symbol}: {str(e)}")
+                send_telegram_alert(
+                    f"Failed to place SELL order for {symbol}: {str(e)} ❌")
 
         # Save the updated portfolio (removing successful sales only)
         save_json_file(updated_portfolio)
@@ -713,11 +838,12 @@ def sell_all_positions(portfolio, all_orders_summary={}):
 
         # Send consolidated notification after processing all sells
         send_batch_telegram_alert(all_orders_summary)
-        send_telegram_alert("BTC < 50MA → All positions processed and portfolio updated.")
+        send_telegram_alert(
+            "BTC < 50MA → All positions processed and portfolio updated. ✅")
 
     else:
         send_telegram_alert(
-            f"[{current_time_utc}] BTC < 50MA → No positions found to sell. No action needed.")
+            f"[{current_time_utc}] BTC < 50MA → No positions found to sell. No action needed. 🔍")
 
     return
 
@@ -730,7 +856,8 @@ def rebalance_portfolio():
     """Rebalance the portfolio at 0000 UTC, based on BTC 50MA condition."""
 
     if is_paused:
-        send_telegram_alert(f"Rebalancing skipped because tasks are paused.")
+        send_telegram_alert(
+            f"Rebalancing skipped because tasks are paused. ⏸️")
         return
 
     current_time_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -750,7 +877,8 @@ def rebalance_portfolio():
     # -----------------------------------------------------------------------
     # BTC ABOVE 50MA → Normal Rebalance
     # -----------------------------------------------------------------------
-    send_telegram_alert(f"[{current_time_utc}] BTC > 50MA → Rebalance into Top 10")
+    send_telegram_alert(
+        f"[{current_time_utc}] BTC > 50MA → Rebalance into Top 10 🔼")
 
     # 3) Fetch today's top 10 coins
     today_top_coins = get_top_10_coins_usdt()
@@ -772,11 +900,17 @@ def rebalance_portfolio():
                     quantity=round_quantity(symbol, qty)
                 )
                 all_orders_summary[symbol] = {
-                    "Side": "SELL",
-                    "Quantity": qty,
-                    "Price": "Market",
+                    "Symbol": symbol,
+                    "Action": "SELL",
+                    "Strategy Quantity": qty,
+                    "Binance Quantity": sell_order.get('executedQty', 0),
+                    "Strategy Price": "Market",
+                    "Filled": sell_order.get('fills')[0].get('price') if sell_order.get('fills') else "-",
+                    "Cost": float(sell_order.get('executedQty', 0)) * float(
+                        sell_order.get('fills')[0].get('price')) if sell_order.get('fills') else 0,
                     "Order ID": sell_order["orderId"],
-                    "Status": sell_order.get("status", "FILLED")
+                    "Live": (get_live_price(symbol) or 0) * qty,
+                    "Status": sell_order.get('status', '-')
                 }
                 del portfolio_dict[symbol]
 
@@ -850,8 +984,7 @@ def rebalance_portfolio():
                         "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                     }
                 else:
-                    raise Exception(f"Order placement for {symbol} failed. Error details: {
-                                    all_orders_summary.get(symbol, 'Unknown Error')}")
+                    raise Exception(f"Order placement for {symbol} failed. Error details: {all_orders_summary.get(symbol, 'Unknown Error')}")
             except Exception as e:
                 all_orders_summary[symbol] = {
                     "Side": "BUY",
@@ -863,7 +996,8 @@ def rebalance_portfolio():
     save_json_file(updated_portfolio, "top_coins.json")
     # Send consolidated notification
     send_batch_telegram_alert(all_orders_summary)
-    send_telegram_alert("Rebalance complete. Portfolio successfully updated.")
+    send_telegram_alert(
+        "Rebalance complete. Portfolio successfully updated. ✅")
 
 
 if __name__ == "__main__":
