@@ -318,65 +318,63 @@ def send_order_summary_notification(order_summary, portfolio_balance=None):
     if not order_summary:
         # Graceful handling for an empty summary (just in case)
         send_telegram_alert(
-            f"📋 *Order Monitoring Summary* ({current_time}): No actions to report.")
+            f"📋 *Order Monitoring Summary* ({current_time}): No actions to report."
+        )
         return
 
-    if all(details.get("Action") == "Already Filled" for details in order_summary.values()):
-        # Special case: All orders are already filled
-        message = f"📋 *Order Monitoring Summary* ({current_time}):\n\n"
-        message += (
-            "```\n"
-            f"{'Symbol':<10} {'Action':<10} {'Strategy Qty':>15} {'Binance Qty':>15} "
-            f"{'Price':>10} {'Cost':>15} {'Order ID':>15} {'Live Value':>12} {'Status':>10}\n"
-            + "-" * 110
-            + "\n"
-        )
-        for symbol, details in order_summary.items():
-            # "Already Filled" case
-            message += (
-                f"\n"
-                f"{symbol:<10} {'Already Filled':<10} {'-':>15} {'-':>15} "
-                f"{'-':>10} {'-':>15} {'-':>15} {'-':>12} {'FILLED':>10}\n"
-            )
-        message += "\n```"
-    else:
-        # General case: Mixed actions
-        message = f"📋 *Order Monitoring Summary* ({current_time}):\n\n"
-        message += (
-            "```\n"
-            f"{'Symbol':<10} {'Action':<10} {'Strategy Qty':>15} {'Binance Qty':>15} "
-            f"{'Price':>10} {'Cost':>15} {'Order ID':>15} {'Live Value':>12} {'Status':>10}\n"
-            + "-" * 110
-            + "\n"
-        )
-        for symbol, details in order_summary.items():
-            if "Error Message" in details:
-                # Error case
-                message += f"{symbol:<10} ERROR: {details['Error Message']}\n"
-            else:
-                # Extract details with fallbacks for missing fields
+    # Helper function for safely formatting numeric values
+    def safe_format(value):
+        try:
+            return f"{float(value):.2f}" if value is not None else "-"
+        except (ValueError, TypeError):
+            return "-"
+
+    # Initialize the message
+    message = f"📋 *Order Monitoring Summary* ({current_time}):\n\n"
+    message += (
+        "\n"
+        f"{'Symbol':<8} {'Action':<10} {'Str Qty':<10} {'Bin Qty':<10} "
+        f"{'Price':<8} {'Cost':<8} {'LIVE':<8} {'Status':<8}\n"
+        + "-" * 65
+    )
+
+    for symbol, details in order_summary.items():
+        clean_symbol = symbol.replace("USDT", "")
+        if "Error Message" in details:
+            # Error case
+            message += f"\n{clean_symbol:<8} ERROR: {details['Error Message']}"
+        else:
+            # Safely extract and format details with fallback for invalid fields
+            try:
                 action = details.get("Action", "-")
-                strategy_qty = details.get("Strategy Quantity", "-")
-                binance_qty = details.get("Binance Quantity", "-")
-                price = details.get("Filled", "-")
-                cost = details.get("Cost", "-")
+                strategy_qty = safe_format(details.get("Strategy Quantity"))
+                binance_qty = safe_format(details.get("Binance Quantity"))
+                price = safe_format(details.get("Filled"))
+                cost = safe_format(details.get("Cost"))
+                live_value = safe_format(details.get("Live"))
                 status = details.get("Status", "-")
-                order_id = details.get("Order ID", "-")
-                live_value = details.get("Live", "-")
 
                 # Format the order details
                 message += (
-                    f"{symbol:<10} {action:<10} {strategy_qty:>15} {binance_qty:>15} "
-                    f"{price:>10} {cost:>15} {order_id:>15} {live_value:>12} {status:>10}\n"
+                    f"\n"
+                    f"{clean_symbol:<8} {action:<12} {strategy_qty:<10} {binance_qty:<10} "
+                    f"{price:<8} {cost:<8} {live_value:<8} {status:<8}\n"
                 )
-        message += "\n```"
+            except Exception as e:
+                # Handle unexpected errors gracefully
+                message += f"\n{clean_symbol:<8} ERROR: {str(e)}"
 
     # Add portfolio balance if provided
     if portfolio_balance is not None:
         message += f"\n💼 *Order Monitoring Complete*:\nPortfolio Balance: ${portfolio_balance:.2f}"
 
     # Add the portfolio value at the end of the message
-    message += "\n\nPortfolio LIVE: " + str(get_portfolio_value())
+    try:
+        portfolio_live_value = get_portfolio_value()
+        message += "\n\nPortfolio LIVE: $" + \
+            f"{float(portfolio_live_value):.2f}"
+    except (ValueError, TypeError):
+        message += "\n\nPortfolio LIVE: -"
 
     # Send the formatted message
     send_telegram_alert(message)
@@ -390,33 +388,39 @@ def send_batch_telegram_alert(all_orders_summary, portfolio_balance=None):
     # Start the message with a header
     message = f"📊 *Rebalance Orders Summary* ({current_time}):\n\n"
     message += (
-        "```\n"
-        f"{'Symbol':<10} {'Action':<8} {'Strategy Qty':>12} {'Binance Qty':>12} "
-        f"{'Price':>10} {'Cost':>15} {'Order ID':>10} {'Live Value':>12} {'Status':>10}\n"
-        + "-" * 95
-        + "\n"
+        "\n"
+        f"{'Symbol':<8} {'Action':<8} {'Str Qty':<10} {'Bin Qty':<10} "
+        f"{'Price':<8} {'Cost':<8} {'LIVE':<8} {'Status':<8}\n"
+        + "-" * 65
     )
 
     for symbol, details in all_orders_summary.items():
+        clean_symbol = symbol.replace("USDT", "")
         if "Error" in details:
             # If there's an error, show it in the message
             message += f"{symbol:<10} ERROR: {details['Error']}\n"
         else:
-            # Extract details with fallbacks for missing fields
+            # Safely extract and format details with fallback for missing or invalid fields
+            def safe_format(value):
+                try:
+                    return f"{float(value):.2f}" if value is not None else "-"
+                except (ValueError, TypeError):
+                    return "-"
+
             action = details.get("Action", "-")
-            strategy_qty = details.get("Strategy Quantity", "-")
-            binance_qty = details.get("Binance Quantity", "-")
-            price = details.get("Filled", "-")
-            cost = details.get("Cost", "-")
+            strategy_qty = safe_format(details.get("Strategy Quantity"))
+            binance_qty = safe_format(details.get("Binance Quantity"))
+            price = safe_format(details.get("Filled"))
+            cost = safe_format(details.get("Cost"))
+            live_value = safe_format(details.get("Live"))
+            # order_id = details.get("Order ID", "-")
             status = details.get("Status", "-")
-            order_id = details.get("Order ID", "-")
-            live_value = details.get("Live", "-")
 
             # Format the order details
             message += (
                 f"\n"
-                f"{symbol:<10} {action:<8} {strategy_qty:>12} {binance_qty:>12} "
-                f"{price:>10} {cost:>15} {order_id:>10} {live_value:>12} {status:>10}\n"
+                f"{clean_symbol:<10} {action:<8} {strategy_qty:<8} {binance_qty:<8} "
+                f"{price:<8} {cost:<8} {live_value:<8} {status:<8}\n"
             )
 
     # Add portfolio balance if provided
@@ -424,10 +428,14 @@ def send_batch_telegram_alert(all_orders_summary, portfolio_balance=None):
         message += f"\n💼 *Rebalance Complete*:\nPortfolio Balance: ${portfolio_balance:.2f}"
 
     # Add the portfolio value at the end of the message
-    message += "\n\nPortfolio LIVE: " + str(get_portfolio_value())
+    try:
+        portfolio_live_value = get_portfolio_value()
+        message += "\n\nPortfolio LIVE: $" + f"{float(portfolio_live_value):.2f}"
+    except (ValueError, TypeError):
+        message += "\n\nPortfolio LIVE: -"
 
     # End message with closing format
-    message += "\n```"
+    message += "\n"
 
     # Send the formatted message
     send_telegram_alert(message)
@@ -556,7 +564,8 @@ def monitor_orders(filename="pending_orders.json"):
     """Check all open orders at 12 PM UTC and convert unfilled orders to market orders."""
     try:
         if is_paused:
-            send_telegram_alert("🚫 Order monitoring skipped because tasks are paused.")
+            send_telegram_alert(
+                "🚫 Order monitoring skipped because tasks are paused.")
             return
 
         # Load pending orders from file
@@ -569,15 +578,17 @@ def monitor_orders(filename="pending_orders.json"):
                 order_status = client.get_order(
                     symbol=symbol, orderId=order['orderId']
                 )
-                qty = order_status['executedQty']
+                # Safely convert executedQty to float
+                qty = float(order_status.get('executedQty', 0))
 
                 # Handle unfilled or partially filled orders
                 if order_status['status'] in ['NEW', 'PARTIALLY_FILLED']:
                     # Cancel the unfilled or partially filled order
                     client.cancel_order(
                         symbol=symbol, orderId=order['orderId'])
-                    remaining_quantity = float(
-                        order_status['origQty']) - float(order_status['executedQty'])
+                    remaining_quantity = max(
+                        0, float(order_status.get('origQty', 0)) - qty
+                    )  # Ensure remaining quantity is non-negative
 
                     # Place a market order for the remaining quantity
                     if remaining_quantity > 0:
@@ -587,17 +598,23 @@ def monitor_orders(filename="pending_orders.json"):
                             type=Client.ORDER_TYPE_MARKET,
                             quantity=round_quantity(symbol, remaining_quantity)
                         )
-                        # Update the summary with all required keys
+                        # Extract market order cost and price
+                        market_fills = market_order.get('fills', [])
+                        market_price = float(
+                            market_fills[0]['price']
+                        ) if market_fills else 0
+                        market_cost = float(
+                            remaining_quantity * market_price
+                        ) if market_price else 0
+
                         order_summary[symbol] = {
                             "Symbol": symbol,
                             "Action": "Market Order Placed",
-                            "Strategy Quantity": order_status['origQty'],
+                            "Strategy Quantity": order_status.get('origQty', "-"),
                             "Binance Quantity": remaining_quantity,
                             "Filled": "Market",
-                            "Cost": float(remaining_quantity) * float(
-                                market_order.get('fills')[0].get('price', 0)
-                            ) if market_order.get('fills') else 0,
-                            "Order ID": market_order['orderId'],
+                            "Cost": market_cost,
+                            "Order ID": market_order.get('orderId', "-"),
                             "Live": (get_live_price(symbol) or 0) * qty,
                             "Status": market_order.get('status', 'FILLED')
                         }
@@ -605,8 +622,8 @@ def monitor_orders(filename="pending_orders.json"):
                         order_summary[symbol] = {
                             "Symbol": symbol,
                             "Action": "No Remaining Quantity",
-                            "Strategy Quantity": order_status['origQty'],
-                            "Binance Quantity": order_status['executedQty'],
+                            "Strategy Quantity": order_status.get('origQty', "-"),
+                            "Binance Quantity": qty,
                             "Filled": "-",
                             "Cost": 0,
                             "Order ID": order['orderId'],
@@ -619,15 +636,14 @@ def monitor_orders(filename="pending_orders.json"):
 
                 elif order_status['status'] == 'FILLED':
                     # If the order is already filled, no further action is required
+                    filled_price = float(order_status.get('price', 0))
                     order_summary[symbol] = {
                         "Symbol": symbol,
                         "Action": "Already Filled",
-                        "Strategy Quantity": order_status['origQty'],
-                        "Binance Quantity": order_status['executedQty'],
+                        "Strategy Quantity": order_status.get('origQty', "-"),
+                        "Binance Quantity": qty,
                         "Filled": "-",
-                        "Cost": float(order_status['executedQty']) * float(
-                            order_status.get('price', 0)
-                        ) if 'price' in order_status else 0,
+                        "Cost": qty * filled_price if filled_price else 0,
                         "Order ID": order['orderId'],
                         "Live": (get_live_price(symbol) or 0) * qty,
                         "Status": "FILLED"
@@ -638,8 +654,8 @@ def monitor_orders(filename="pending_orders.json"):
                     order_summary[symbol] = {
                         "Symbol": symbol,
                         "Action": "No Action Taken",
-                        "Strategy Quantity": order_status['origQty'],
-                        "Binance Quantity": order_status['executedQty'],
+                        "Strategy Quantity": order_status.get('origQty', "-"),
+                        "Binance Quantity": qty,
                         "Filled": "-",
                         "Cost": 0,
                         "Order ID": order['orderId'],
@@ -648,6 +664,7 @@ def monitor_orders(filename="pending_orders.json"):
                     }
 
             except Exception as e:
+                # Catch individual order errors and record them
                 order_summary[symbol] = {
                     "Symbol": symbol,
                     "Action": "Error",
