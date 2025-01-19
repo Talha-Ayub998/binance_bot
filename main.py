@@ -278,7 +278,7 @@ def place_vwap_order(symbol, side, allocation, vwap, all_orders_summary):
             "Binance Quantity": order.get("executedQty", 0),
             "Strategy Price": f"{price:.2f}",
             "Filled": order.get("fills")[0].get("price") if order.get("fills") else "-",
-            "Cost": float(quantity) * float(price),
+            "Cost": (order.get("executedQty", 0)) * float(price),
             "Order ID": order["orderId"],
             "Live": (get_live_price(symbol) or 0) * quantity,
             "Status": order.get("status", "PENDING")
