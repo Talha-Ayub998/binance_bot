@@ -192,7 +192,7 @@ def get_top_10_coins_usdt():
                         f"{symbol}: Insufficient data (less than 32 days including current day). Skipping...")
                     continue
                 roc30 = calculate_roc30(data)
-                volume = data['volume'][-7:].sum()
+                volume = (data['volume'] * data['close']).iloc[-7:].sum()
                 if volume and volume > 10_000_000:
                     filtered_coins.append({'symbol': symbol, 'ROC30': roc30})
                 else:
