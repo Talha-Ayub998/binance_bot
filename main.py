@@ -1,18 +1,21 @@
-import sys
-import logging
-import pandas as pd
-import requests
-import time
-import threading
-from binance.client import Client
-from datetime import datetime, timedelta, timezone
-import schedule
-import math
-import json
 import os
-from dotenv import load_dotenv
+import json
+import math
+import time
+import logging
+import threading
+import schedule
+import requests
+import functools
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from dotenv import load_dotenv
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import pandas as pd
+import numpy as np
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
 
 # Load the .env file
 load_dotenv()
@@ -39,28 +42,69 @@ orders = {}
 is_paused = False  # Global flag to control scheduling
 
 
+# Decorator for rate-limiting and exponential backoff
+def rate_limit_retry(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        retries = 5
+        delay = 1  # Initial delay in seconds
+        for attempt in range(retries):
+            try:
+                return func(*args, **kwargs)
+            except BinanceAPIException as e:
+                if e.code == -1003:  # API rate limit exceeded
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                else:
+                    raise
+        raise Exception("Rate limit exceeded after retries.")
+    return wrapper
+
+
 def send_telegram_alert(message=None, image_path=None):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+    retries = 3
+    delay = 2  # Initial delay for retry mechanism
 
     # Send a text message if provided
     if message:
         url = f"{base_url}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-        try:
-            requests.post(url, json=payload, timeout=10)
-        except Exception as e:
-            print_log(f"Error sending Telegram message: {e}")
+
+        for attempt in range(retries):
+            try:
+                response = requests.post(url, json=payload, timeout=10)
+                if response.status_code == 200:
+                    break
+                else:
+                    raise Exception(f"Failed to send message: {response.text}")
+            except Exception as e:
+                if attempt == retries - 1:
+                    print_log(f"Telegram message failed after retries: {e}")
+                else:
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
 
     # Send an image if provided
     if image_path:
         url = f"{base_url}/sendPhoto"
-        try:
-            with open(image_path, "rb") as image:
-                files = {"photo": image}
-                payload = {"chat_id": TELEGRAM_CHAT_ID}
-                requests.post(url, data=payload, files=files, timeout=10)
-        except Exception as e:
-            print_log(f"Error sending Telegram image: {e}")
+
+        for attempt in range(retries):
+            try:
+                with open(image_path, "rb") as image:
+                    files = {"photo": image}
+                    payload = {"chat_id": TELEGRAM_CHAT_ID}
+                    response = requests.post(url, data=payload, files=files, timeout=10)
+                    if response.status_code == 200:
+                        break
+                    else:
+                        raise Exception(f"Failed to send image: {response.text}")
+            except Exception as e:
+                if attempt == retries - 1:
+                    print_log(f"Telegram image failed after retries: {e}")
+                else:
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff)
 
 
 def get_folder_logger():
@@ -99,6 +143,7 @@ def print_log(message):
     logger.info(message)
 
 
+@rate_limit_retry
 def fetch_ohlcv(symbol, interval="1h", lookback="1 day ago UTC"):
     try:
         # Parse lookback into a start time (convert "50 days ago UTC" to an actual timestamp)
@@ -124,7 +169,7 @@ def fetch_ohlcv(symbol, interval="1h", lookback="1 day ago UTC"):
         response = requests.get(url, params=params)
         # Check for errors
         if response.status_code != 200:
-            print_log(f"Error fetching data from Binance: {response.text}")
+            print_log(f"Error fetching data  from Binance: for {symbol}: {response.text}")
             return pd.DataFrame()
         # Parse response JSON
         raw_data = response.json()
@@ -146,18 +191,32 @@ def fetch_ohlcv(symbol, interval="1h", lookback="1 day ago UTC"):
 
 def calculate_roc30(data):
     """
-    Calculate the 30-day Rate of Change (ROC) for the latest available day.
+    Calculate the 30-day Rate of Change (ROC) for the latest available day using pct_change.
     """
-    latest_close = data['close'].iloc[-2]
-    old_close = data['close'].iloc[-32]
-    if pd.isna(old_close):
+    try:
+        # Calculate percentage change over a 30-day period
+        roc = data['close'].pct_change(periods=30) * 100
+        # Return the second-to-last value (equivalent to -2 in manual calculation)
+        return roc.iloc[-2]
+    except Exception as e:
+        print(f"Error calculating ROC30: {e}")
         return None
-    return ((latest_close - old_close) / old_close) * 100
 
 
 def calculate_vwap(data):
-    """Calculate VWAP."""
-    return (data['close'] * data['volume']).sum() / data['volume'].sum()
+    if data is None:
+        return "Error: Input data is None."
+
+    required_columns = {'close', 'volume'}
+    if not required_columns.issubset(data.columns):
+        return f"Error: Missing required columns. Required: {required_columns}"
+
+    try:
+        vwap = (data['close'] * data['volume']).sum() / data['volume'].sum()
+        return vwap
+    except Exception as e:
+        return f"Error calculating VWAP: {e}"
+
 
 
 def is_strategy_active(symbol, ma_period=50, interval="1d", lookback="51 days ago UTC"):
@@ -177,6 +236,7 @@ def is_strategy_active(symbol, ma_period=50, interval="1d", lookback="51 days ag
 
 
 # ---- Strategy Functions ----
+@rate_limit_retry
 def get_top_10_coins_usdt():
     try:
         """Get symbols of the top 10 USDT pairs by ROC30 and volume."""
@@ -211,8 +271,10 @@ def get_top_10_coins_usdt():
         return top_symbols
     except Exception as e:
         print_log(f"Error in get_top_10_coins_usdt: {e}")
+        return []
 
 
+@rate_limit_retry
 def get_symbol_info(symbol):
     """Fetch symbol-specific information, including price and quantity filters."""
     exchange_info = client.get_exchange_info()
@@ -246,10 +308,12 @@ def round_price(symbol, price):
         if f['filterType'] == 'PRICE_FILTER':
             tick_size = float(f['tickSize'])
             precision = int(round(-math.log(tick_size, 10), 0))
-            return round(price, precision)
+            price = round(price, precision)
+
     return price
 
 
+@rate_limit_retry
 def place_vwap_order(symbol, side, allocation, vwap, all_orders_summary):
     """Place limit order at VWAP and add summary to the provided summary dictionary."""
     try:
@@ -536,7 +600,7 @@ def generate_cumulative_graph(image_path="portfolio_graph.png"):
         return
 
     # Extract dates and values
-    dates = [item["date"] for item in data]
+    dates = [datetime.strptime(item["date"], "%Y-%m-%d") for item in data]
     values = [item["value"] for item in data]
 
     if not dates or not values:
@@ -544,11 +608,18 @@ def generate_cumulative_graph(image_path="portfolio_graph.png"):
         return
 
     # Plot the data
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 6))
     plt.plot(dates, values, marker="o", linestyle="-")
     plt.title("Day Start Portfolio Value Over Time")
     plt.xlabel("Date")
     plt.ylabel("Portfolio Value (USDT)")
+
+    # Format x-axis ticks
+    plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator())
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    plt.gca().xaxis.set_minor_locator(mdates.MonthLocator())
+    plt.gca().xaxis.set_minor_formatter(mdates.DateFormatter("%b"))
+
     plt.xticks(rotation=45)
     plt.grid(True)
     plt.tight_layout()
@@ -557,7 +628,7 @@ def generate_cumulative_graph(image_path="portfolio_graph.png"):
     plt.savefig(image_path)
     plt.close()
     print(f"Graph saved as {image_path}")
-    send_telegram_alert(image_path="portfolio_graph.png")
+    send_telegram_alert(image_path=image_path)
 
 
 def monitor_orders(filename="pending_orders.json"):
@@ -855,12 +926,10 @@ def sell_all_positions(portfolio, all_orders_summary={}):
 
         # Send consolidated notification after processing all sells
         send_batch_telegram_alert(all_orders_summary)
-        send_telegram_alert(
-            "BTC < 50MA → All positions processed and portfolio updated. ✅")
+        send_telegram_alert("BTC < 50MA → All positions processed and portfolio updated. ✅")
 
     else:
-        send_telegram_alert(
-            f"[{current_time_utc}] BTC < 50MA → No positions found to sell. No action needed. 🔍")
+        send_telegram_alert(f"[{current_time_utc}] BTC < 50MA → No positions found to sell. No action needed. 🔍")
 
     return
 
@@ -873,12 +942,31 @@ def rebalance_portfolio():
     """Rebalance the portfolio at 0000 UTC, based on BTC 50MA condition."""
 
     if is_paused:
-        send_telegram_alert(
-            f"Rebalancing skipped because tasks are paused. ⏸️")
+        send_telegram_alert(f"Rebalancing skipped because tasks are paused. ⏸️")
         return
 
     current_time_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     all_orders_summary = {}
+
+    # Fetch the current account balance dynamically
+    try:
+        account_info = client.get_account()
+        total_balance_usdt = sum(
+            float(balance['free']) + float(balance['locked'])
+            for balance in account_info['balances']
+            if balance['asset'] == 'USDT'
+        )
+        allocation_percentage = 0.10  # Allocate 10% of the total balance
+        allocated_capital = total_balance_usdt * allocation_percentage
+
+        if allocated_capital <= 0:
+            send_telegram_alert("Insufficient balance for rebalancing.")
+            return
+
+    except Exception as e:
+        print_log(f"Error fetching account balance: {e}")
+        send_telegram_alert(f"Error fetching account balance: {e}")
+        return
 
     # 1) Load the portfolio (the coins we previously bought under this strategy)
     portfolio = load_json_file(filename="top_coins.json")
@@ -899,6 +987,10 @@ def rebalance_portfolio():
 
     # 3) Fetch today's top 10 coins
     today_top_coins = get_top_10_coins_usdt()
+    if not today_top_coins:
+        send_telegram_alert("No coins available for rebalancing.")
+        return
+
     new_symbols = [c["symbol"] for c in today_top_coins]
     portfolio_dict = {p["symbol"]: p for p in portfolio}
 
@@ -909,38 +1001,49 @@ def rebalance_portfolio():
         sell_message = f"Selling positions not in today's Top 10 ({current_time_utc}):\n"
         for symbol in coins_to_sell:
             qty = portfolio_dict[symbol]["quantity"]
-            try:
-                sell_order = client.create_order(
-                    symbol=symbol,
-                    side="SELL",
-                    type=Client.ORDER_TYPE_MARKET,
-                    quantity=round_quantity(symbol, qty)
-                )
-                all_orders_summary[symbol] = {
-                    "Symbol": symbol,
-                    "Action": "SELL",
-                    "Strategy Quantity": qty,
-                    "Binance Quantity": sell_order.get('executedQty', 0),
-                    "Strategy Price": "Market",
-                    "Filled": sell_order.get('fills')[0].get('price') if sell_order.get('fills') else "-",
-                    "Cost": float(sell_order.get('executedQty', 0)) * float(
-                        sell_order.get('fills')[0].get('price')) if sell_order.get('fills') else 0,
-                    "Order ID": sell_order["orderId"],
-                    "Live": (get_live_price(symbol) or 0) * qty,
-                    "Status": sell_order.get('status', '-')
-                }
-                del portfolio_dict[symbol]
+            retry_attempts = 3
+            delay = 1  # Initial delay for exponential backoff
 
-                # Safely remove the symbol from pending_orders
-                if symbol in pending_orders:
-                    del pending_orders[symbol]
+            while retry_attempts > 0:
+                try:
+                    sell_order = client.create_order(
+                        symbol=symbol,
+                        side="SELL",
+                        type=Client.ORDER_TYPE_MARKET,
+                        quantity=round_quantity(symbol, qty)
+                    )
+                    all_orders_summary[symbol] = {
+                        "Symbol": symbol,
+                        "Action": "SELL",
+                        "Strategy Quantity": qty,
+                        "Binance Quantity": sell_order.get('executedQty', 0),
+                        "Strategy Price": "Market",
+                        "Filled": sell_order.get('fills')[0].get('price') if sell_order.get('fills') else "-",
+                        "Cost": float(sell_order.get('executedQty', 0)) * float(
+                            sell_order.get('fills')[0].get('price')) if sell_order.get('fills') else 0,
+                        "Order ID": sell_order["orderId"],
+                        "Live": (get_live_price(symbol) or 0) * qty,
+                        "Status": sell_order.get('status', '-')
+                    }
+                    del portfolio_dict[symbol]
 
-                log_transaction("SELL", symbol, qty)
-            except Exception as e:
-                all_orders_summary[symbol] = {
-                    "Side": "SELL",
-                    "Error": str(e)
-                }
+                    # Safely remove the symbol from pending_orders
+                    if symbol in pending_orders:
+                        del pending_orders[symbol]
+
+                    log_transaction("SELL", symbol, qty)
+                    break
+                except Exception as e:
+                    retry_attempts -= 1
+                    if retry_attempts == 0:
+                        all_orders_summary[symbol] = {
+                            "Side": "SELL",
+                            "Error": str(e)
+                        }
+                        send_telegram_alert(f"Failed to sell {symbol} after retries: {e}")
+                    else:
+                        time.sleep(delay)
+                        delay *= 2  # Exponential backoff
         save_json_file(pending_orders, "pending_orders.json")
         send_telegram_alert(sell_message)
 
@@ -948,7 +1051,7 @@ def rebalance_portfolio():
     coins_to_buy = [symbol for symbol in new_symbols if symbol not in portfolio_dict]
     if coins_to_buy:
         buy_message = f"Buying new coins in today's Top 10 (as of {current_time_utc}):\n"
-        allocation_per_coin = PORTFOLIO_VALUE / len(today_top_coins)
+        allocation_per_coin = allocated_capital / len(today_top_coins)
         coin_map = {c["symbol"]: c for c in today_top_coins}
         # Temporary dictionary to store calculated values
         buy_data = {}
@@ -957,7 +1060,10 @@ def rebalance_portfolio():
         for symbol in coins_to_buy:
             try:
                 coin_data = coin_map[symbol]
-                vwap = calculate_vwap(fetch_ohlcv(symbol))  # Calculate VWAP once
+                vwap = calculate_vwap(fetch_ohlcv(symbol))
+                if vwap is None:
+                    raise ValueError(f"Invalid VWAP for {symbol}")
+
                 quantity = allocation_per_coin / vwap
                 quantity = round_quantity(symbol, quantity)
 
@@ -976,7 +1082,7 @@ def rebalance_portfolio():
                 log_transaction("BUY", symbol, quantity,
                                 roc30=coin_data["ROC30"], vwap=vwap)
             except Exception as e:
-                buy_message += f"- Error selling {symbol}: {e}\n"
+                buy_message += f"- Error buying {symbol}: {e}\n"
         # Send the message before placing any orders
         send_telegram_alert(buy_message)
 
@@ -1007,14 +1113,16 @@ def rebalance_portfolio():
                     "Side": "BUY",
                     "Error": str(e)
                 }
+    else:
+        send_telegram_alert(f"✅ Already holding today's Top 10 coins.")
+        return
 
     # 6) Save the updated portfolio (convert dict back to list)
     updated_portfolio = list(portfolio_dict.values())
     save_json_file(updated_portfolio, "top_coins.json")
-    # Send consolidated notification
-    send_batch_telegram_alert(all_orders_summary)
-    send_telegram_alert(
-        "Rebalance complete. Portfolio successfully updated. ✅")
+    if all_orders_summary:
+        send_batch_telegram_alert(all_orders_summary)
+        send_telegram_alert("Rebalance complete. Portfolio successfully updated. ✅")
 
 
 if __name__ == "__main__":
