@@ -810,7 +810,7 @@ def handle_telegram_commands():
                             rebalance_portfolio()
                         elif command == "/stop":
                             send_telegram_alert(
-                                "Manual override: Selling all positions and pausing all scheduled tasks. ❌"
+                                "Manual override: Selling all positions and pausing all scheduled tasks. 🚨"
                             )
                             portfolio = load_json_file(filename="top_coins.json")
                             sell_all_positions(portfolio)
@@ -1114,7 +1114,7 @@ def rebalance_portfolio():
                     "Error": str(e)
                 }
     else:
-        send_telegram_alert(f"✅ Already holding today's Top 10 coins.")
+        send_telegram_alert(f"✅ Already holding today's Top 10 coins. No buys are needed.")
         return
 
     # 6) Save the updated portfolio (convert dict back to list)
