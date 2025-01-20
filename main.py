@@ -318,7 +318,7 @@ def place_vwap_order(symbol, side, allocation, vwap, all_orders_summary):
     """Place limit order at VWAP and add summary to the provided summary dictionary."""
     try:
         # Fetch VWAP and calculate quantity/price
-        price = vwap if side == "BUY" else vwap * 1.02
+        price = vwap * 0.98
         quantity = allocation / price
 
         # Adjust quantity and price
