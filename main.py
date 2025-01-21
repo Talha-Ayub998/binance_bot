@@ -240,8 +240,12 @@ def is_strategy_active(symbol, ma_period=50, interval="1d", lookback="51 days ag
 def get_top_10_coins_usdt():
     try:
         """Get symbols of the top 10 USDT pairs by ROC30 and volume."""
-        symbols = [s['symbol'] for s in client.get_exchange_info(
-        )['symbols'] if s['quoteAsset'] == 'USDT']
+        symbols = [
+            s['symbol'] for s in client.get_exchange_info()['symbols']
+            if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING'
+        ]
+        # symbols = [s['symbol'] for s in client.get_exchange_info(
+        # )['symbols'] if s['quoteAsset'] == 'USDT']
         filtered_coins = []
         for symbol in symbols:
             try:
