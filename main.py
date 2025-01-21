@@ -284,6 +284,68 @@ def get_symbol_info(symbol):
     return None
 
 
+def validate_order(symbol, price, quantity):
+    """
+    Validate and adjust price and quantity for an order based on Binance filters.
+    Ensures compliance with PRICE_FILTER, LOT_SIZE, and MIN_NOTIONAL.
+
+    Parameters:
+        symbol (str): The trading pair symbol (e.g., 'BTCUSDT').
+        price (float): The price to validate and adjust.
+        quantity (float): The quantity to validate and adjust.
+    Returns:
+        tuple: Validated and adjusted (price, quantity).
+    """
+    symbol_info = get_symbol_info(symbol)
+    if not symbol_info:
+        raise ValueError(f"Symbol information not found for {symbol}")
+
+    # Adjust price using PRICE_FILTER
+    for f in symbol_info['filters']:
+        if f['filterType'] == 'PRICE_FILTER':
+            tick_size = float(f['tickSize'])
+            # Round down to nearest tick size
+            price = math.floor(price / tick_size) * tick_size
+
+    # Adjust quantity using LOT_SIZE
+    for f in symbol_info['filters']:
+        if f['filterType'] == 'LOT_SIZE':
+            step_size = float(f['stepSize'])
+            min_qty = float(f['minQty'])
+
+            # Automatically adjust quantity to minQty if it's too small
+            if quantity < min_qty:
+                quantity = min_qty
+
+            # Calculate precision based on step size
+            precision = int(round(-math.log(step_size, 10), 0))
+
+            # Round down to nearest step size
+            quantity = math.floor(quantity / step_size) * step_size
+
+            # Explicitly round to the required precision
+            quantity = round(quantity, precision)
+
+            if quantity < min_qty:
+                raise ValueError(f"Quantity {quantity} is below the minimum allowed {min_qty}")
+
+    # Validate against MIN_NOTIONAL
+    for f in symbol_info['filters']:
+        if f['filterType'] == 'MIN_NOTIONAL':
+            min_notional = float(f['minNotional'])
+            if price * quantity < min_notional:
+                # Adjust quantity to meet minNotional if possible
+                adjusted_quantity = min_notional / price
+                quantity = math.floor(adjusted_quantity / step_size) * step_size
+                quantity = round(quantity, precision)
+                if quantity < min_qty:
+                    raise ValueError(
+                        f"Order value {price * quantity} is below the minimum notional value {min_notional}"
+                    )
+
+    return price, quantity
+
+
 def round_quantity(symbol, quantity):
     """Round the quantity to the correct precision based on LOT_SIZE."""
     symbol_info = get_symbol_info(symbol)
@@ -322,8 +384,9 @@ def place_vwap_order(symbol, side, allocation, vwap, all_orders_summary):
         quantity = allocation / price
 
         # Adjust quantity and price
-        quantity = round_quantity(symbol, quantity)
-        price = round_price(symbol, price)
+        price, quantity = validate_order(symbol, price, quantity)
+        # quantity = round_quantity(symbol, quantity)
+        # price = round_price(symbol, price)
 
         # Place limit order at VWAP
         order = client.create_order(
@@ -663,11 +726,12 @@ def monitor_orders(filename="pending_orders.json"):
 
                     # Place a market order for the remaining quantity
                     if remaining_quantity > 0:
+                        price = get_live_price(symbol)
                         market_order = client.create_order(
                             symbol=symbol,
                             side=order['side'],
                             type=Client.ORDER_TYPE_MARKET,
-                            quantity=round_quantity(symbol, remaining_quantity)
+                            quantity=(validate_order(symbol, price, remaining_quantity))[1]
                         )
                         # Extract market order cost and price
                         market_fills = market_order.get('fills', [])
@@ -889,11 +953,12 @@ def sell_all_positions(portfolio, all_orders_summary={}):
             quantity = pos["quantity"]
             # Attempt to place a Market SELL order
             try:
+                price = get_live_price(symbol)
                 sell_order = client.create_order(
                     symbol=symbol,
                     side="SELL",
                     type=Client.ORDER_TYPE_MARKET,
-                    quantity=round_quantity(symbol, quantity)
+                    quantity=(validate_order(symbol, price, quantity))[1]
                 )
                 all_orders_summary[symbol] = {
                     "Symbol": symbol,
@@ -996,6 +1061,8 @@ def rebalance_portfolio():
 
     # 4) Market-sell any coin that's in the file but not in today's top 10
     coins_to_sell = [symbol for symbol in portfolio_dict if symbol not in new_symbols]
+    coins_to_hold = [symbol for symbol in portfolio_dict if symbol in new_symbols]
+
     if coins_to_sell:
         pending_orders = load_json_file(filename="pending_orders.json")
         sell_message = f"Selling positions not in today's Top 10 ({current_time_utc}):\n"
@@ -1006,11 +1073,12 @@ def rebalance_portfolio():
 
             while retry_attempts > 0:
                 try:
+                    price = get_live_price(symbol)
                     sell_order = client.create_order(
                         symbol=symbol,
                         side="SELL",
                         type=Client.ORDER_TYPE_MARKET,
-                        quantity=round_quantity(symbol, qty)
+                        quantity=(validate_order(symbol, price, qty))[1]
                     )
                     all_orders_summary[symbol] = {
                         "Symbol": symbol,
@@ -1065,7 +1133,7 @@ def rebalance_portfolio():
                     raise ValueError(f"Invalid VWAP for {symbol}")
 
                 quantity = allocation_per_coin / vwap
-                quantity = round_quantity(symbol, quantity)
+                quantity = (validate_order(symbol, vwap * 0.98, quantity))[1]
 
                 # Store data in temporary dictionary for reuse
                 buy_data[symbol] = {
@@ -1120,9 +1188,23 @@ def rebalance_portfolio():
     # 6) Save the updated portfolio (convert dict back to list)
     updated_portfolio = list(portfolio_dict.values())
     save_json_file(updated_portfolio, "top_coins.json")
+
+        # Generate a summary of held coins for the Telegram notification
+    hold_message = ''
+    if coins_to_hold:
+        for symbol in coins_to_hold:
+            hold_message = f"Holding positions (as of {current_time_utc}):\n"
+            hold_message += (
+                f"- {symbol}: Qty={portfolio_dict[symbol]['quantity']}, "
+                f"Last Updated={portfolio_dict[symbol]['time']}\n"
+            )
+
+    # Combine all notifications into a single summary
+    summary_message = hold_message + "\nRebalance complete. Portfolio successfully updated. ✅"
     if all_orders_summary:
         send_batch_telegram_alert(all_orders_summary)
-        send_telegram_alert("Rebalance complete. Portfolio successfully updated. ✅")
+
+    send_telegram_alert(summary_message)
 
 
 if __name__ == "__main__":
