@@ -445,7 +445,7 @@ def send_order_summary_notification(order_summary, portfolio_balance=None):
     if not order_summary:
         # Graceful handling for an empty summary (just in case)
         send_telegram_alert(
-            f"📋 *Order Monitoring Summary* ({current_time}): No actions to report."
+            f" *Order Monitoring Summary* ({current_time}): No actions to report."
         )
         return
 
@@ -457,7 +457,7 @@ def send_order_summary_notification(order_summary, portfolio_balance=None):
             return "-"
 
     # Initialize the message
-    message = f"📋 *Order Monitoring Summary* ({current_time}):\n\n"
+    message = f" *Order Monitoring Summary* ({current_time}):\n\n"
     message += (
         "\n"
         f"{'Symbol':<8} {'Action':<10} {'Str Qty':<10} {'Bin Qty':<10} "
@@ -817,7 +817,7 @@ def monitor_orders(filename="pending_orders.json"):
         save_json_file(pending_orders, "pending_orders.json")
         if not order_summary:
             send_telegram_alert(
-                "📋 Order Monitoring Summary: No pending orders in the file. No actions required."
+                " Order Monitoring Summary: No pending orders in the file. No actions required."
             )
             return
 
