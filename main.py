@@ -1196,8 +1196,8 @@ def rebalance_portfolio():
         # Generate a summary of held coins for the Telegram notification
     hold_message = ''
     if coins_to_hold:
+        hold_message += f"Holding positions (as of {current_time_utc}):\n\n\n"
         for symbol in coins_to_hold:
-            hold_message = f"Holding positions (as of {current_time_utc}):\n"
             hold_message += (
                 f"- {symbol}: Qty={portfolio_dict[symbol]['quantity']}, "
                 f"Last Updated={portfolio_dict[symbol]['time']}\n"
