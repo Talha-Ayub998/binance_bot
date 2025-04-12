@@ -15,7 +15,6 @@ import matplotlib.dates as mdates
 import pandas as pd
 import numpy as np
 from binance.client import Client
-from binance.enums import *
 from binance.exceptions import BinanceAPIException
 
 # Load the .env file
@@ -30,16 +29,11 @@ logger.setLevel(logging.INFO)
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-FUTURE_API_KEY_ = os.getenv("FUTURE_API_KEY")
-FUTURE_API_SECRET = os.getenv("FUTURE_API_SECRET")
 
 # Initialize Binance Client
 client = Client(API_KEY, API_SECRET, testnet=True)
 
-client_future = Client(FUTURE_API_KEY_, FUTURE_API_SECRET, testnet=True)
 # Globals
 PORTFOLIO_VALUE = 100  # Example portfolio value
 TOP_N_COINS = 10
@@ -47,11 +41,6 @@ TOP_N_COINS = 10
 orders = {}
 is_paused = False  # Global flag to control scheduling
 
-market_type_map = {}
-USE_DYNAMIC_VOL_SIZING = True
-TARGET_VOL = 0.45
-ALLOCATION_PER_COIN_PERCENT = 0.05
-MAX_POSITIONS = 20
 
 # Decorator for rate-limiting and exponential backoff
 def rate_limit_retry(func):
@@ -155,7 +144,7 @@ def print_log(message):
 
 
 @rate_limit_retry
-def fetch_ohlcv(symbol, interval="1d", lookback="30 days ago UTC"):
+def fetch_ohlcv(symbol, interval="1h", lookback="1 day ago UTC"):
     try:
         # Parse lookback into a start time (convert "50 days ago UTC" to an actual timestamp)
         if "day" in lookback:
@@ -251,7 +240,10 @@ def is_strategy_active(symbol, ma_period=50, interval="1d", lookback="51 days ag
 def get_top_10_coins_usdt():
     try:
         """Get symbols of the top 10 USDT pairs by ROC30 and volume."""
-        symbols = get_top_50_liquid_symbols()
+        symbols = [
+            s['symbol'] for s in client.get_exchange_info()['symbols']
+            if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING'
+        ]
         # symbols = [s['symbol'] for s in client.get_exchange_info(
         # )['symbols'] if s['quoteAsset'] == 'USDT']
         filtered_coins = []
@@ -285,134 +277,6 @@ def get_top_10_coins_usdt():
         print_log(f"Error in get_top_10_coins_usdt: {e}")
         return []
 
-
-def get_portfolio_value():
-    try:
-        account_info = client_future.futures_account()
-        balance = float(account_info["totalWalletBalance"])
-        return balance
-    except:
-        return 0
-
-def place_order(symbol, side, quantity, price=None, market_type="SPOT"):
-    try:
-        if market_type == "SPOT":
-            return client.create_order(
-                symbol=symbol, side=side,
-                type=ORDER_TYPE_MARKET if price is None else ORDER_TYPE_LIMIT,
-                quantity=quantity,
-                price=f"{price:.8f}" if price else None,
-                timeInForce=TIME_IN_FORCE_GTC if price else None
-            )
-        else:
-            return client_future.futures_create_order(
-                symbol=symbol, side=side,
-                type=FUTURE_ORDER_TYPE_MARKET if price is None else FUTURE_ORDER_TYPE_LIMIT,
-                quantity=quantity,
-                price=f"{price:.8f}" if price else None,
-                timeInForce=TIME_IN_FORCE_GTC if price else None
-            )
-    except Exception as e:
-        send_telegram_alert(f"Order error: {e}")
-        return None
-
-def fetch_7day_avg_volume(symbol, market_type="SPOT"):
-    try:
-        if market_type == "FUTURES":
-            klines = client_future.futures_klines(symbol=symbol, interval="1d", limit=7)
-        else:
-            klines = client.get_klines(symbol=symbol, interval="1d", limit=7)
-        return np.mean([float(c[5]) * float(c[4]) for c in klines])
-    except:
-        return 0
-
-def get_preferred_market(symbol_base):
-    spot_symbol = f"{symbol_base}USDT"
-    futures_symbol = f"{symbol_base}USDT"
-    spot_volume = fetch_7day_avg_volume(spot_symbol, "SPOT")
-    futures_volume = fetch_7day_avg_volume(futures_symbol, "FUTURES")
-    if futures_volume > spot_volume:
-        market_type_map[spot_symbol] = "FUTURES"
-        return futures_symbol, "FUTURES"
-    else:
-        market_type_map[spot_symbol] = "SPOT"
-        return spot_symbol, "SPOT"
-
-
-def get_ma20_signals(df):
-    ma20 = df['close'].rolling(window=20).mean()
-    cross_above = (df['close'] > ma20) & (df['close'].shift(1) <= ma20.shift(1))
-    cross_below = df['close'] < ma20
-    return ma20, cross_above, cross_below
-
-
-def get_top_50_liquid_symbols():
-    symbols = [
-        s['symbol'] for s in client.get_exchange_info()['symbols']
-        if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING'
-    ]
-    volume_scores = {}
-    for symbol in symbols:
-        df = fetch_ohlcv(symbol, interval="1d", lookback="32 days ago UTC")
-        if len(df) < 30: continue
-        dv = df['close'] * df['volume']
-        volume_scores[symbol] = dv.iloc[-30:].mean()
-    return sorted(volume_scores, key=volume_scores.get, reverse=True)[:50]
-
-def calculate_volatility_position_size(returns, window=14, target_vol=TARGET_VOL):
-    rolling_vol = returns.rolling(window=window).std() * np.sqrt(252)
-    latest_vol = rolling_vol.iloc[-1]
-    if latest_vol <= 0 or np.isnan(latest_vol):
-        raise ValueError("Invalid volatility.")
-    return target_vol / latest_vol
-
-def check_margin_health(n_warn=0.30, n_sell=0.20, n_stop=0.10):
-    try:
-        data = client_future.futures_account()
-        available = float(data["availableBalance"])
-        total = float(data["totalWalletBalance"])
-        if total == 0: return
-        ratio = available / total
-        if ratio < n_stop:
-            send_telegram_alert(f"🔴 Margin <10%: {ratio:.2%} — Full liquidation.")
-            reduce_portfolio_by(1.0)
-        elif ratio < n_sell:
-            send_telegram_alert(f"🚨 Margin <20%: {ratio:.2%} — Sell 30% of portfolio.")
-            reduce_portfolio_by(0.3)
-        elif ratio < n_warn:
-            send_telegram_alert(f"⚠️ Margin <30%: {ratio:.2%}. Monitor.")
-    except Exception as e:
-        send_telegram_alert(f"❌ Margin check failed: {e}")
-
-def reduce_portfolio_by(percent, portfolio_file="top_coins.json"):
-    portfolio = load_json_file(portfolio_file)
-    recovery_plan = {}
-    for pos in portfolio:
-        symbol = pos["symbol"]
-        qty = pos["quantity"] * percent
-        market_type = market_type_map.get(symbol, "SPOT")
-        place_order(symbol, "SELL", qty, market_type=market_type)
-        recovery_plan[symbol] = {"symbol": symbol, "quantity": qty, "market_type": market_type}
-    if recovery_plan:
-        save_json_file(recovery_plan, "recovery_plan.json")
-
-def recover_positions(filename="recovery_plan.json"):
-    recovery_plan = load_json_file(filename)
-    if not recovery_plan: return
-    for symbol, entry in recovery_plan.items():
-        qty = entry["quantity"]
-        mt = entry.get("market_type", "SPOT")
-        place_order(symbol, "BUY", qty, market_type=mt)
-    save_json_file({}, filename)
-
-def load_json_file(filename):
-    if not os.path.exists(filename): return {}
-    with open(filename, "r") as f:
-        return json.load(f)
-
-def save_json_file(data, filename):
-    with open(filename, "w") as f:
-        json.dump(data, f, indent=2)
 
 @rate_limit_retry
 def get_symbol_info(symbol):
@@ -708,6 +572,44 @@ def send_batch_telegram_alert(all_orders_summary, portfolio_balance=None):
     send_telegram_alert(message)
 
 
+def get_portfolio_value():
+    try:
+        # Get account balances
+        account_info = client.get_account()
+        balances = account_info['balances']
+        # Get current prices
+        prices = {item['symbol']: float(item['price'])
+                  for item in client.get_all_tickers()}
+        # Initialize portfolio details
+        portfolio_details = []
+        total_value = 0
+        for balance in balances:
+            asset = balance['asset']
+            free_amount = float(balance['free'])
+            locked_amount = float(balance['locked'])
+            total_amount = free_amount + locked_amount
+            if total_amount > 0:  # Only consider assets with a non-zero balance
+                asset_value = 0
+                if asset == 'USDT':  # USDT is already in USD
+                    asset_value = total_amount
+                else:
+                    symbol = f"{asset}USDT"
+                    if symbol in prices:
+                        asset_value = total_amount * prices[symbol]
+
+                total_value += asset_value
+                # portfolio_details.append({
+                #     "asset": asset,
+                #     "free": free_amount,
+                #     "locked": locked_amount,
+                #     "total": total_amount,
+                #     "value_usd": asset_value
+                # })
+        return round(total_value, 2)
+            # "portfolio_breakdown": portfolio_details
+    except Exception as e:
+        print(f"Error occurred while calculating portfolio value: {e}")
+        return None
 
 
 def record_daily_portfolio_value():
@@ -929,6 +831,22 @@ def monitor_orders(filename="pending_orders.json"):
         send_telegram_alert(f"❌ Error monitoring orders: {e}")
 
 
+def load_json_file(filename="top_coins.json"):
+    """Load a JSON file and return its content. Return a default dictionary or list if the file doesn't exist."""
+    if not os.path.exists(filename):
+        # Default to an empty dictionary for pending orders
+        return {} if filename == "pending_orders.json" else []
+    with open(filename, "r") as f:
+        data = json.load(f)
+        # Ensure pending_orders.json is a dictionary
+        if filename == "pending_orders.json" and not isinstance(data, dict):
+            return {}
+        return data
+
+
+def save_json_file(portfolio, filename="top_coins.json"):
+    with open(filename, "w") as f:
+        json.dump(portfolio, f, indent=2)
 
 
 def handle_telegram_commands():
@@ -1209,13 +1127,6 @@ def rebalance_portfolio():
         coin_map = {c["symbol"]: c for c in today_top_coins}
         # Temporary dictionary to store calculated values
         buy_data = {}
-        price_data = fetch_ohlcv(symbol)
-        if price_data is None or price_data.empty:
-            raise ValueError(f"No price data for {symbol}")
-        _, cross_above, _ = get_ma20_signals(price_data)
-        if not cross_above.iloc[-2]:
-            raise ValueError(f"{symbol} did not cross above MA20, skipping.")
-
 
         # First loop: Calculate and generate the buy message
         for symbol in coins_to_buy:
@@ -1226,14 +1137,6 @@ def rebalance_portfolio():
                     raise ValueError(f"Invalid VWAP for {symbol}")
 
                 quantity = allocation_per_coin / vwap
-                if USE_DYNAMIC_VOL_SIZING:
-                    returns = price_data['close'].pct_change()
-                    try:
-                        position_scaler = calculate_volatility_position_size(returns)
-                        quantity *= position_scaler
-                    except:
-                        print_log(f"Volatility sizing failed for {symbol}, using fixed quantity.")
-
                 quantity = (validate_order(symbol, vwap * 0.98, quantity))[1]
 
                 # Store data in temporary dictionary for reuse
@@ -1308,27 +1211,14 @@ def rebalance_portfolio():
     send_telegram_alert(summary_message)
 
 
-    import time
 if __name__ == "__main__":
-    # Sleep for 1 hour (3600 seconds)
-    check_margin_health()
-    time.sleep(5)
-    recover_positions()
-    time.sleep(5)
-    rebalance_portfolio()
-    time.sleep(5)
-    monitor_orders()
-    time.sleep(3600)
-    
     # rebalance_portfolio()
-    # # rebalance_portfolio()
-    # threading.Thread(target=handle_telegram_commands, daemon=True).start()
-    # schedule.every(5).minutes.do(check_margin_health)
-    # schedule.every().day.at("00:05").do(recover_positions)
-    # schedule.every().day.at("00:01").do(rebalance_portfolio)
-    # schedule.every().day.at("12:00").do(monitor_orders)
+    threading.Thread(target=handle_telegram_commands, daemon=True).start()
+    schedule.every().day.at("00:00").do(daily_portfolio_task)
+    schedule.every().day.at("00:01").do(rebalance_portfolio)
+    schedule.every().day.at("12:00").do(monitor_orders)
 
-    # while True:
-    #     if not is_paused:  # Only run tasks if not paused
-    #         schedule.run_pending()
-    #     time.sleep(60)  # Check every minute
+    while True:
+        if not is_paused:  # Only run tasks if not paused
+            schedule.run_pending()
+        time.sleep(60)  # Check every minute
