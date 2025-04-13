@@ -416,6 +416,30 @@ def reduce_portfolio_by(percent, portfolio_file="top_coins.json"):
     if recovery_plan:
         save_json_file(recovery_plan, "recovery_plan.json")
 
+
+def cover_short_positions(current_bottom_roc_symbols):
+    """Buy to cover shorts that are no longer in the bottom 10 or when BTC > MA50"""
+    short_positions = load_json_file("short_positions.json")
+    if not short_positions:
+        return
+    remaining_shorts = []
+    for pos in short_positions:
+        symbol = pos["symbol"]
+        if symbol not in current_bottom_roc_symbols:
+            try:
+                qty = pos["quantity"]
+                market_type = market_type_map.get(symbol, "FUTURES")
+                place_order(symbol, "BUY", qty, market_type=market_type)
+                log_transaction("COVER", symbol, qty)
+                send_telegram_alert(f"✅ Covered short for {symbol} at market.")
+            except Exception as e:
+                send_telegram_alert(f"❌ Failed to cover short for {symbol}: {e}")
+                remaining_shorts.append(pos)
+        else:
+            remaining_shorts.append(pos)
+    save_json_file(remaining_shorts, "short_positions.json")
+
+
 def recover_positions(filename="recovery_plan.json"):
     recovery_plan = load_json_file(filename)
     if not recovery_plan: return
@@ -1207,11 +1231,29 @@ def rebalance_portfolio():
             send_telegram_alert(f"❌ Error shorting {symbol}: {e}")
 
 
+    
+            short_data[symbol] = {
+                "vwap": vwap,
+                "quantity": quantity,
+                "roc30": coin["ROC30"],
+                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            }
+
+    # Save short positions to file
+    save_json_file(
+        [{"symbol": s, **d} for s, d in short_data.items()],
+        "short_positions.json"
+    )
+
     # -----------------------------------------------------------------------
     # BTC ABOVE 50MA → Normal Rebalance
     # -----------------------------------------------------------------------
     send_telegram_alert(
         f"[{current_time_utc}] BTC > 50MA → Rebalance into Top 10 🔼")
+
+    
+    today_top_coins = get_top_10_coins_usdt()
+    cover_short_positions([c["symbol"] for c in get_bottom_10_coins_usdt()])
 
     # 3) Fetch today's top 10 coins
     today_top_coins = get_top_10_coins_usdt()
@@ -1391,6 +1433,7 @@ def rebalance_portfolio():
 
 
 if __name__ == "__main__":
+    # rebalance_portfolio()
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
     schedule.every(5).minutes.do(check_margin_health)
     schedule.every().day.at("00:00").do(daily_portfolio_task)
