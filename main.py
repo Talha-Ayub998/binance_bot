@@ -1310,25 +1310,14 @@ def rebalance_portfolio():
 
     import time
 if __name__ == "__main__":
-    # Sleep for 1 hour (3600 seconds)
-    check_margin_health()
-    time.sleep(5)
-    recover_positions()
-    time.sleep(5)
-    rebalance_portfolio()
-    time.sleep(5)
-    monitor_orders()
-    time.sleep(3600)
-    
     # rebalance_portfolio()
-    # # rebalance_portfolio()
-    # threading.Thread(target=handle_telegram_commands, daemon=True).start()
-    # schedule.every(5).minutes.do(check_margin_health)
-    # schedule.every().day.at("00:05").do(recover_positions)
-    # schedule.every().day.at("00:01").do(rebalance_portfolio)
-    # schedule.every().day.at("12:00").do(monitor_orders)
+    threading.Thread(target=handle_telegram_commands, daemon=True).start()
+    schedule.every(5).minutes.do(check_margin_health)
+    schedule.every().day.at("00:05").do(recover_positions)
+    schedule.every().day.at("00:01").do(rebalance_portfolio)
+    schedule.every().day.at("12:00").do(monitor_orders)
 
-    # while True:
-    #     if not is_paused:  # Only run tasks if not paused
-    #         schedule.run_pending()
-    #     time.sleep(60)  # Check every minute
+    while True:
+        if not is_paused:  # Only run tasks if not paused
+            schedule.run_pending()
+        time.sleep(60)  # Check every minute
