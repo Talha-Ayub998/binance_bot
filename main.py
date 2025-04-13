@@ -246,6 +246,26 @@ def is_strategy_active(symbol, ma_period=50, interval="1d", lookback="51 days ag
         return False
 
 
+def get_bottom_10_coins_usdt():
+    all_symbols = get_top_50_liquid_symbols()
+    filtered_coins = []
+    for symbol in all_symbols:
+        try:
+            data = fetch_ohlcv(symbol, interval="1d", lookback="32 days ago UTC")
+            if len(data) < 32:
+                continue
+            roc30 = calculate_roc30(data)
+            volume = (data['volume'] * data['close']).iloc[-8:-1].mean()
+            if volume > 10_000_000:
+                filtered_coins.append({'symbol': symbol, 'ROC30': roc30})
+        except:
+            continue
+    filtered_coins = [c for c in filtered_coins if c['ROC30'] is not None]
+    bottom_10 = sorted(filtered_coins, key=lambda x: x['ROC30'])[:TOP_N_COINS]
+
+    print_log(f"Bottom 10 Coins: {bottom_10}")
+    return bottom_10
+
 # ---- Strategy Functions ----
 @rate_limit_retry
 def get_top_10_coins_usdt():
@@ -1201,7 +1221,7 @@ def rebalance_portfolio():
         save_json_file(pending_orders, "pending_orders.json")
         send_telegram_alert(sell_message)
 
-    # 5) Market-buy any new coins that are in today's top 10 but not in the file
+    # 5) Market-buy  any coins in today's Top 10 but not in portfolio
     coins_to_buy = [symbol for symbol in new_symbols if symbol not in portfolio_dict]
     if coins_to_buy:
         buy_message = f"Buying new coins in today's Top 10 (as of {current_time_utc}):\n"
@@ -1209,23 +1229,28 @@ def rebalance_portfolio():
         coin_map = {c["symbol"]: c for c in today_top_coins}
         # Temporary dictionary to store calculated values
         buy_data = {}
-        price_data = fetch_ohlcv(symbol)
-        if price_data is None or price_data.empty:
-            raise ValueError(f"No price data for {symbol}")
-        _, cross_above, _ = get_ma20_signals(price_data)
-        if not cross_above.iloc[-2]:
-            raise ValueError(f"{symbol} did not cross above MA20, skipping.")
-
 
         # First loop: Calculate and generate the buy message
         for symbol in coins_to_buy:
             try:
                 coin_data = coin_map[symbol]
-                vwap = calculate_vwap(fetch_ohlcv(symbol))
+
+                # --- MA20 Entry Condition ---
+                price_data = fetch_ohlcv(symbol)
+                if price_data is None or price_data.empty:
+                    raise ValueError(f"No price data for {symbol}")
+                _, cross_above, _ = get_ma20_signals(price_data)
+                if not cross_above.iloc[-2]:
+                    raise ValueError(f"{symbol} did not cross above MA20, skipping.")
+
+                # --- VWAP Calculation ---
+                vwap = calculate_vwap(price_data)
                 if vwap is None:
                     raise ValueError(f"Invalid VWAP for {symbol}")
 
                 quantity = allocation_per_coin / vwap
+
+                # --- Volatility Sizing ---
                 if USE_DYNAMIC_VOL_SIZING:
                     returns = price_data['close'].pct_change()
                     try:
@@ -1276,7 +1301,7 @@ def rebalance_portfolio():
                         "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                     }
                 else:
-                    raise Exception(f"Order placement for {symbol} failed. Error details: {all_orders_summary.get(symbol, 'Unknown Error')}")
+                    raise Exception(f"Order placement for {symbol} failed. Error: {all_orders_summary.get(symbol)}")
             except Exception as e:
                 all_orders_summary[symbol] = {
                     "Side": "BUY",
@@ -1310,7 +1335,6 @@ def rebalance_portfolio():
 
     import time
 if __name__ == "__main__":
-    # rebalance_portfolio()
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
     schedule.every(5).minutes.do(check_margin_health)
     schedule.every().day.at("00:00").do(daily_portfolio_task)
