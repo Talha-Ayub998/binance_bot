@@ -1313,8 +1313,9 @@ if __name__ == "__main__":
     # rebalance_portfolio()
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
     schedule.every(5).minutes.do(check_margin_health)
-    schedule.every().day.at("00:05").do(recover_positions)
+    schedule.every().day.at("00:00").do(daily_portfolio_task)
     schedule.every().day.at("00:01").do(rebalance_portfolio)
+    schedule.every().day.at("00:05").do(recover_positions)
     schedule.every().day.at("12:00").do(monitor_orders)
 
     while True:
