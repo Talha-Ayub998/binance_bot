@@ -1148,7 +1148,64 @@ def rebalance_portfolio():
         # BTC BELOW 50MA → Market-Sell All from the file
         # -----------------------------------------------------------------------
         sell_all_positions(portfolio)
+
+    # -----------------------------------------------------------------------
+    # BTC BELOW 50MA → SHORT the Bottom 10 ROC coins
+    # -----------------------------------------------------------------------
+    send_telegram_alert(
+        f"[{current_time_utc}] BTC < 50MA → Enter Short Strategy (Bottom 10 ROC) 🔽")
+
+    bottom_roc_coins = get_bottom_10_coins_usdt()
+    if not bottom_roc_coins:
+        send_telegram_alert("No coins available for shorting.")
         return
+
+    short_data = {}
+    allocation_per_coin = allocated_capital / len(bottom_roc_coins)
+    for coin in bottom_roc_coins:
+        symbol = coin['symbol']
+        try:
+            price_data = fetch_ohlcv(symbol)
+            if price_data is None or price_data.empty:
+                raise ValueError(f"No price data for {symbol}")
+            _, _, cross_below = get_ma20_signals(price_data)
+            if not cross_below.iloc[-2]:
+                raise ValueError(f"{symbol} did not cross below MA20, skipping.")
+
+            vwap = calculate_vwap(price_data)
+            if vwap is None:
+                raise ValueError(f"Invalid VWAP for {symbol}")
+
+            quantity = allocation_per_coin / vwap
+
+            if USE_DYNAMIC_VOL_SIZING:
+                returns = price_data['close'].pct_change()
+                try:
+                    position_scaler = calculate_volatility_position_size(returns)
+                    quantity *= position_scaler
+                except:
+                    print_log(f"Volatility sizing failed for {symbol}, using fixed quantity.")
+
+            quantity = (validate_order(symbol, vwap * 1.02, quantity))[1]
+
+            short_data[symbol] = {
+                "vwap": vwap,
+                "quantity": quantity,
+                "roc30": coin["ROC30"],
+            }
+
+            place_vwap_order(
+                symbol=symbol,
+                side="SELL",
+                allocation=allocation_per_coin,
+                vwap=vwap,
+                all_orders_summary=all_orders_summary
+            )
+
+            log_transaction("SHORT", symbol, quantity, roc30=coin["ROC30"], vwap=vwap)
+        except Exception as e:
+            send_telegram_alert(f"❌ Error shorting {symbol}: {e}")
+
 
     # -----------------------------------------------------------------------
     # BTC ABOVE 50MA → Normal Rebalance
@@ -1333,7 +1390,6 @@ def rebalance_portfolio():
     send_telegram_alert(summary_message)
 
 
-    import time
 if __name__ == "__main__":
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
     schedule.every(5).minutes.do(check_margin_health)
