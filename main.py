@@ -1145,12 +1145,28 @@ def rebalance_portfolio():
 
     # Fetch the current account balance dynamically
     try:
-        account_info = client.get_account()
-        total_balance_usdt = sum(
-            float(balance['free']) + float(balance['locked'])
-            for balance in account_info['balances']
-            if balance['asset'] == 'USDT'
-        )
+        spot_balance_usdt = 0
+        future_balance_usdt = 0
+
+        try:
+            # Spot balance
+            account_info_spot = client.get_account()
+            spot_balance_usdt = sum(
+                float(balance['free']) + float(balance['locked'])
+                for balance in account_info_spot['balances']
+                if balance['asset'] == 'USDT'
+            )
+        except Exception as e:
+            print_log(f"Error fetching SPOT balance: {e}")
+
+        try:
+            # Futures balance
+            account_info_futures = client_future.futures_account()
+            future_balance_usdt = float(account_info_futures.get("totalWalletBalance", 0))
+        except Exception as e:
+            print_log(f"Error fetching FUTURES balance: {e}")
+
+        total_balance_usdt = spot_balance_usdt + future_balance_usdt
         allocation_percentage = 0.10  # Allocate 10% of the total balance
         allocated_capital = total_balance_usdt * allocation_percentage
 
@@ -1251,9 +1267,7 @@ def rebalance_portfolio():
     send_telegram_alert(
         f"[{current_time_utc}] BTC > 50MA → Rebalance into Top 10 🔼")
 
-    
-    today_top_coins = get_top_10_coins_usdt()
-    cover_short_positions([c["symbol"] for c in get_bottom_10_coins_usdt()])
+    cover_short_positions([c["symbol"] for c in bottom_roc_coins])
 
     # 3) Fetch today's top 10 coins
     today_top_coins = get_top_10_coins_usdt()
